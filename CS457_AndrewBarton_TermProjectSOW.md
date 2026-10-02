@@ -2,6 +2,7 @@
 
 **Student Name:** Andrew Barton  
 **Date:** 2026-09-16  
+**Last Updated:** 2026-10-02  
 **Course:** CS 457 - Computer Networks  
 **Target Server Domain:** `server.barton.edu`  
 
@@ -18,36 +19,20 @@
 
 ### 1.1 Game Overview
 - **Chosen Game:** Russian Roulette
-- **Player Capacity:** 2 Players (Simulated via 2 CML Client nodes, could potentially go higher if allowed)
-- **Game Summary:** It's more or less how it sounds. Players take turns passing back and forth a 1D array of length 6. Only one address in that array is occupied by a value. During a turn, one player 'fires' by entering the command 'trigger'. This will randomly select an index in the array between [0] and [5]. If that index in the array is occupied, the gun fires, the player 'dies' and loses the game. If the player doesn't die, they can choose to add another bullet to the revolver using the 'load' command (adding an additional value to the array) to increase the chances that the other player loses if they attempt play, or they can choose to do nothing. Their choice isn't revealed to the other player, only that the player that just 'fired' didn't lose. If on their next turn they successfully survive once more, they will be allowed to choose to add double the previous number of rounds available to be added to the revolver, increasing their chances of winning further. Players can choose to abstain from taking their turn by entering the 'pass' command. If a player abstains and the next player survives their round, the player that passes automatically loses by failing to take their chances when it worked 'in their favor' to do so. The game is over when only one player remains and that player is the winner of the game.
+- **Player Capacity:** Two players, simulated by two CML client nodes. More than two players is outside the current deliverable.
+- **Game Summary:** A server manages a shared six-chamber revolver and two players. One randomly chosen chamber initially contains a bullet. Each trigger pull independently samples an index uniformly from 0 through 5; it does not advance through chambers in sequence. A loaded sample kills the firing player and ends the match. An empty sample earns private banked bullets and an opportunity to load before handing over the turn. A pass is a dare that forces the opponent to shoot and, if that opponent survives, forces the passer to shoot on the following turn. It does not automatically eliminate the passer.
 
 ### 1.2 Core Game Rules & Win/Draw Conditions
-- **Turn Mechanics:**
-    1. Player turn order is decided at random, the revolver begins with one index in the array set to any value.
-
-    2. The player that plays next is presented with a choice to shoot or pass.
-
-        3. If the player elected to shoot, the game 'shoots' by selecting a random index in the array and checking to see if it is 'none'.
-
-            o If that value is *not* 'none':
-              - The player that just entered 'trigger' is shown a 'game over - you lost' message while the other player is shown a 'congratulations! you win!' message. (in a two-player construct.) 
-              - Alternatively, that player would be be shown a 'game over - you lost' message and returned to the game's splash screen while the remaining players continue to play. The player that lost could have their data retained by the server for displaying match results at the end for the winner, or it can be discarded. In this style of architecture, if the revolver fires the only remaining round in the chamber, one is automatically loaded again, either invisible to the players or demonstrated through a message displayed to clients describing a referee for the game loading the round and spinning the chamber themselves.
-
-            o If that value *is* 'none':
-              - The player is presented with an option to 'add more bullets' or 'pass'
-
-                4. If the player chooses to 'add more bullets':
-                  - The player is allowed to select up to ***survivedRounds*** 'bullets' to add to the array, where (6>=(***survivedRounds*** - bulLoaded) >= 0). If ***survivedRounds*** > 2, a player can choose to double the amount of rounds added to the revolver, ensuring that if the game lasts longer than two rounds a loser is guaranteed if the current player adds as many rounds to the revolver as possible (Round 1: 1 bullet ->3 bullets(now 50% chance, both players loaded after surviving), Round 2: 3 -> 5 bullets @83% chance to lose on next player turn (6 if both players survive), Round 3: 6 -> P1 dead. This can occur whether the player loaded rounds on the first turn or not, because the number of rounds a player can add with each round survived doubles. On the 3rd round, the first player can add 4 bullets to the array (1 x 2 x 2 = 4), which is highly likely to have at least 1 in it at that point for the same 83% chance at the minimum.
-
-                    o If the player chooses to add rounds:
-                      - ***N*** rounds are 'added to' the array in addresses indexed at random until there are no more rounds to be added.
-
-                   If the player does not choose to add rounds:
-                  - the turn is automatically passed back to the other player and the turn mechanics repeat from 2.
-
-- **Victory Condition:** The player wins the game when there are no other players alive.
-
-- **Draw/Tie Condition:** The victory condition and attrition through increased round counts and iteration over probability organically prevents tie conditions. The chances that a player dies only go up until one player has died, and in the 2-player only version of the game this is an instant win for the player that doesn't die. Even in a game with more players than two, the same invariant holds as long as there remains a player to continue playing because the amount of maximum bullets than can be added to the revolver is undefined. 
+1. **Initial state:** Randomize the first player. The revolver has six slots, one loaded and five empty. Proposed initial inventory is zero for each player.
+2. **Normal turn:** The active player chooses `TRIGGER` or `PASS`. Each trigger independently samples a chamber. Empty slots are represented conceptually by `None`; occupied slots contain a bullet.
+3. **Fatal shot:** Remove the fired bullet from the sampled chamber and eliminate its shooter. The other player wins immediately. No further reward or loading phase occurs.
+4. **Survival reward:** Every successful trigger survival credits the firing player's inventory according to their own repeating cycle: `1 -> 2 -> 4 -> 5 -> 1 -> ...`. Award five before resetting the next reward to one. Unspent inventory persists across that reset. Loading or declining to load does not reset or advance the cycle. The next reward position is never disclosed to either client; each player sees their own current inventory.
+5. **Loading:** After surviving, the player may load a positive number of banked bullets, up to both their inventory and the number of empty chambers, including filling the cylinder. Loaded bullets occupy randomly chosen distinct empty slots. There is no unloading action. Declining to load spends nothing. Proposed version-one behavior: one accepted `LOAD` or `END_TURN` finishes the loading phase.
+6. **Pass/dare:** A normal-turn `PASS` transfers the turn and obligates the opponent to pull the trigger. If that opponent dies, the passer wins. If they survive, they earn their reward and may load or end their turn; the original passer must then pull the trigger. If the passer also survives, they earn their reward and may load or end their turn, after which the opponent has a normal turn. Neither forced turn permits another pass.
+7. **Hidden information:** Neither client receives cylinder contents, the loaded chamber count, the opponent's inventory, their loading quantity, or either next reward position. A full cylinder guarantees death for the next player who pulls the trigger. This does not identify in advance which player will be obliged to shoot. Outcomes and validation feedback may permit deductions.
+8. **Leaving:** An intentional `DISCONNECT` forfeits an active match. A detected connection interruption reserves the player's server state for a reconnection window; a successful reconnection immediately receives their authorized current state. The exact timeout and pause policy are draft proposals in the protocol.
+- **Victory Condition:** The other player is eliminated or forfeits.
+- **Draw/Tie Condition:** Successful gameplay actions are resolved serially, so a fatal shot produces one winner. Transport failures can instead abort a match with no winner, as proposed in the FSM. No fixed maximum number of turns is promised; loading is optional and shots are random.
 
 ---
 
@@ -55,37 +40,15 @@
 
 ### 2.1 Message Transport & Serialization Format
 - **Transport Protocol:** TCP
-- **Serialization Format:** [JSON / Fixed-Header Binary / Delimited Text]
-- **Framing Mechanism:** [e.g., Newline-delimited (`\n`) JSON payloads OR 4-byte big-endian length prefix]
+- **Serialization Format:** UTF-8 JSON objects.
+- **Framing Mechanism:** One single-line JSON object followed by one LF byte (`0x0A`).
+- **Maximum Frame Payload:** Proposed limit of 4,096 bytes, excluding LF. This is a ceiling, not padding or a target size.
 
 ### 2.2 Message Schema Definitions
-
-#### Message Types:
-1. `CONNECT` (Client -> Server): Request to join the game room.
-2. `LOBBY_WAIT` (Server -> Client): Notification that server is waiting for Player 2.
-3. `GAME_START` (Server -> Clients): Game initiated, assigns roles (e.g. Player X vs Player O).
-4. `MOVE` (Client -> Server): Player action (e.g., cell coordinates or answer choice).
-5. `STATE_UPDATE` (Server -> Clients): Broadcast current game board / state and active player turn.
-6. `GAME_OVER` (Server -> Clients): Victory / Draw notification with final scores.
-7. `ERROR` (Server -> Client): Invalid move or malformed packet error.
-
-#### Example JSON Protocol Schema:
-```json
-{
-  "msg_type": "MOVE",
-  "player_id": "Player_1",
-  "payload": {
-    "row": 0,
-    "col": 2
-  },
-  "timestamp": 1727000000
-}
-```
-
----
+See [protocol_blueprint.md](protocol_blueprint.md) for the draft message inventory, field specifications, validation, privacy rules, framing behavior, and wire examples. Confirmed game decisions and proposed protocol details are distinguished there.
 
 ### 2.3 Game State Machine (FSM) Design (Sprint 1 Deliverable)
-- **State Transitions:** Detail state flow: `INIT` -> `WAITING_FOR_PLAYERS` -> `PLAYER_TURN` -> `EVALUATE_MOVE` -> `CHECK_WIN_DRAW` -> `GAME_OVER` -> `CLEANUP`.
+See [fsm_specificaiton.md](fsm_specificaiton.md) for the draft Mermaid diagram, transition table, forced-turn sequence, reconnection behavior, and conformance scenarios.
 
 ---
 
