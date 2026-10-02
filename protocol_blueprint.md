@@ -21,6 +21,7 @@ The detailed schemas below are proposed for review, not claims that the student 
 | D6 | Retain terminal results and session tokens for 30 seconds before cleanup; no rematches or simultaneous rooms in v1. | Permit recovery of a result that was missed during interruption. |
 | D7 | Detect transport loss through EOF/transport failure for this sprint; decide later whether silent-link failure detection needs a heartbeat. | A reconnect deadline cannot begin until the server detects loss. |
 | D8 | If one player times out while the opponent is also disconnected, abort with no winner. | Avoid awarding a win to an absent player. |
+| D9 | Five-second per-frame write-completion, close-flush, and client quit-wait budgets. | Bound stalled output/cleanup; distinct from reconnect grace and receive polling. |
 
 Do not implement an unresolved proposal as an approved requirement. Multiplayer expansion, UI tutorials, score persistence, and socket boilerplate are outside this document.
 
@@ -224,6 +225,93 @@ Proposed recovery policy:
 
 A server process crash and recovery from disk are outside v1. Grace begins at detection, not at the unknowable instant the physical connection failed. Silent failure detection remains D7.
 
+
+### 6.1 Transport event classification
+
+**R1 — Intent is established by the application message.** An intentional forfeit requires a complete, schema-valid client DISCONNECT that the server processes on the current bound connection. TCP FIN, EOF, reset, an exception, or a client closing its window is not evidence of that message. Even an orderly TCP shutdown without processed DISCONNECT follows interruption/grace policy. A malformed or unterminated DISCONNECT is not a forfeit.
+
+Python API names below illustrate the behavior for a likely Python implementation; equivalent socket APIs must preserve the same classification. This is an API behavior contract, not socket boilerplate.
+
+| Observation on the current established connection | Classification | Required behavior |
+|---|---|---|
+| A receive requested with a positive buffer size returns empty bytes, e.g. recv(n) returns b'' with n > 0 | EOF: peer will send no further bytes on that connection | Stop receiving; apply R2 and the one-time loss procedure R5 unless closure/outcome was already resolved. Do not repeatedly read EOF. |
+| Peer closes its sending direction only, potentially retaining its receive direction | TCP half-close | V1 does not support half-closed active sessions. Treat as EOF/interruption unless a processed DISCONNECT already established intentional departure. |
+| ConnectionResetError, ConnectionAbortedError, BrokenPipeError, or equivalent fatal socket error during established-session read/write | Transport failure | Immediately detach the connection and invoke R5. No attempt to send ERROR back over the failed connection. |
+| Nonempty send returns a positive count smaller than the remaining frame | Partial write, not failure | Advance that frame's byte offset by exactly the returned count; retain and send only the suffix on the same connection. Preserve frame order. |
+| Nonempty send returns zero | Failed write / no usable progress | Invoke R5; do not spin or resubmit a whole gameplay action. |
+| BlockingIOError / EAGAIN / EWOULDBLOCK on established read/write | Temporary would-block condition | Keep buffers, byte offsets, session and gameplay intact; await readiness. Do not mark disconnected or busy-loop. Write-completion deadline still applies. |
+| EINTR / InterruptedError from an interrupted low-level I/O operation, without application cancellation | Interrupted operation | Retry only that I/O operation with known remaining bytes and preserved state, not the MOVE. Python often retries automatically. An API failure with unknown partial-send progress follows R3 instead. |
+| Explicitly configured receive polling timeout expires | No data within one polling interval | Check timers and continue waiting. No automatic forfeit, EOF inference, or connection-loss declaration. No inactivity/game-turn deadline is specified in v1. |
+| OS-reported connection timeout, established write timeout, or write-completion deadline expires | Failed transport/output operation | Invoke R5. A receive polling timeout must be distinguishable from this by operation and error context; do not classify every TimeoutError identically. |
+| Other OSError from established-session read/write, after recoverable conditions above have been excluded | Unclassified socket failure | Log operation and numeric error; detach safely using R5. Never silently continue on a potentially unusable socket. |
+| EOF/error/timeout before a CONNECT or RECONNECT has successfully bound the new connection | Unbound connection failure | Close that connection only. Do not invent a player, alter a reserved existing session, or start a new grace period. |
+| Later EOF/error after processed DISCONNECT, server closure, terminal resolution, or detachment | Duplicate/expected closure event | Retire transport resources without another gameplay outcome or grace-period reset. |
+
+Short receives with positive byte counts are ordinary data, not EOF. A readiness notification alone is not EOF; the actual receive result determines it. An accept/connect failure affects the listener or new connection, not an existing player's game. Nonblocking connect-in-progress is not a successful binding or a player loss.
+
+### 6.2 Receive ordering and incomplete data
+
+**R2.** Complete frames already obtained from the stream must be validated and processed in stream order before that stream's EOF event is resolved, while the connection remains eligible to accept input. Stop at a processed DISCONNECT or fatal framing error and ignore all subsequent bytes from that closing connection. Do not attempt to drain an unread/reset socket after declaring a fatal error.
+
+An incomplete final suffix is discarded without executing it or manufacturing a MALFORMED_FRAME reply to a closed peer. Thus a valid DISCONNECT frame followed by FIN remains an intentional forfeit; a partial DISCONNECT followed by FIN follows interruption policy. If a successful MOVE precedes EOF, its atomic effects remain committed before the interruption. A later socket error may prevent bytes still in the network/OS from being obtained; do not claim all sent commands were received.
+
+### 6.3 Failed writes and delivery uncertainty
+
+**R3.** Gameplay commit and output delivery are separate. Failure to send a result must not undo, repeat, or resample the accepted MOVE. The client's next successful RECONNECT receives the committed snapshot. Neither local write success nor queueing a message proves that the other application processed it.
+
+For a partially written frame, retain known offsets only while the same live connection remains in use. After connection failure discard its outgoing bytes, including any unfinished frame; never transfer that suffix to the new connection. A reconnect begins a new stream with WELCOME and a complete fresh snapshot.
+
+If a send-all API raises, the delivered byte count can be unknown. Do not restart the same frame from byte zero on that stream or automatically replay its associated action. Retire the failed connection and recover by snapshot. An ERROR or DISCONNECT acknowledgement whose send fails is best-effort; its failure never changes a previously committed forfeit or terminal result.
+
+**R4 — Bounded output, proposed D9.** Each outgoing frame has a five-second monotonic write-completion budget beginning at its first write attempt; partial progress does not restart it. A transient would-block observation before this deadline is recoverable. Deadline expiry classifies the connection as failed output. A server-requested close also has a five-second total flush budget beginning when closure is decided; queue final control/result frames in order, then close when output completes, a fatal write occurs, or that budget expires. Use the earlier applicable deadline. Do not wait indefinitely for a peer acknowledgement or FIN. No blocking network I/O or flush may hold the authoritative-state lock or prevent the server processing another session's events/timers.
+
+This budget does not detect a silent link while nobody writes. It is distinct from reconnection grace, receive polling, and terminal-result retention.
+
+### 6.4 One-time connection retirement and cleanup
+
+**R5.** For a current bound active connection, atomically:
+
+1. Verify the session binding/generation still identifies this connection and it has not already been retired. Stale callbacks may clean up only their own obsolete transport resources; they must not change the current session binding or gameplay, even if an OS descriptor number has been reused.
+2. Mark it retired and remove it from gameplay input/readiness registration before closing; subsequent reads/writes/callbacks cannot mutate the session.
+3. Preserve authoritative match data. If there is no prior intentional departure, cleanup closure, or terminal result, mark the player DISCONNECTED and set their grace deadline exactly once from the original loss-detection time. For active play, save the active phase/context and enter PAUSED. If already PAUSED for the other player, preserve the original saved phase and give only the newly absent player a deadline.
+4. Remove transport buffers/queues belonging to the retired connection. Queue authorized snapshots for remaining peers; process any resulting peer write failure as a separate session loss rather than recursively performing network I/O inside this transition.
+5. Best-effort shutdown and close the socket explicitly. Log cleanup errors; they cannot escape cleanup, restart grace, alter a match result, or prevent cleanup of the other connection.
+
+Unbound connections skip all match/session mutation. Lobby sessions use the reserved-seat policy; terminal sessions preserve their fixed result and retention deadline. Cleanup is idempotent: EOF followed by write failure, multiple worker callbacks, or shutdown followed by close cannot create multiple loss transitions. The first detected loss time controls grace even if cleanup or notification fails.
+
+**R6.** Mark server-requested closing connections as closing, stop accepting their input, and record the closure cause before flushing/closing. After processed client DISCONNECT, outcome/seat release is committed before final messages are attempted. After fatal protocol validation, an assigned active/lobby session follows the existing interruption policy immediately, while a single diagnostic ERROR may be flushed within R4; stop parsing subsequent frames. This closing socket is output-only: it cannot accept gameplay or restart grace. If an outgoing frame was already partially written, finish its remaining bytes before the diagnostic; if that cannot complete within budget, skip the diagnostic and close. No diagnostic may be inserted into the middle of an unfinished frame. A later resume may replace the session binding before this flush finishes; old-socket cleanup still cannot affect the new binding. After normal match cleanup, never reopen grace for a resulting EOF or exception.
+
+Expected already-disconnected/already-closed errors during shutdown/close are cleanup diagnostics, not new failures. Application coding errors, signal-driven cancellation, listener failures, and process shutdown must not be blanket-caught and relabeled as player forfeits. Surface internal faults to server diagnostics; server-crash persistence remains outside v1.
+
+### 6.5 Client-side termination contract
+
+**R7.** A client that detects unexpected EOF/fatal established-socket error without a received terminal/closure notification stops sending gameplay, discards that connection's partial buffers, and retains its last credential for a reconnect attempt. It cannot declare itself or the opponent the winner locally. After RECONNECT, wait for WELCOME and STATE_UPDATE before issuing a new MOVE; never automatically resend a potentially accepted action.
+
+A player choosing to quit sends the complete DISCONNECT frame, disables further actions and automatic reconnection, and attempts to receive the final result/acknowledgement. Proposed client quit-wait budget is five seconds from the quit request; close on acknowledgement, EOF/error, or expiry. If the server never processes the complete request, the server follows EOF/failure policy; the client's intention or successful local send cannot substitute for receipt.
+
+Received DISCONNECT/CLIENT_REQUEST or MATCH_CLOSED stops reconnection. Received GAME_OVER fixes the displayed result; subsequent closure does not imply an additional loss. No client reconnect retry schedule, connect timeout, heartbeat, or turn-inactivity deadline is selected by this section.
+
+### 6.6 Transport conformance scenarios
+
+| ID | Scenario | Required outcome |
+|---|---|---|
+| C1 | Positive-sized receive returns empty bytes without processed DISCONNECT | One interruption, grace begins; no immediate forfeit. |
+| C2 | Full valid DISCONNECT then FIN, with later read/write exception | One intentional forfeit; no new grace or changed result. |
+| C3 | Half-close without DISCONNECT | No active half-closed session; use interruption policy even if writes might still succeed. |
+| C4 | EOF after partial JSON / partial DISCONNECT | Discard suffix; no action/forfeit manufactured. |
+| C5 | Accepted survival shot, then reset while sending its result | Reward awarded exactly once; resume shows committed LOAD state. |
+| C6 | Read/write would-block, short positive receive/write, or receive polling timeout | Preserve connection and game; no forfeit or grace unless a separate fatal condition occurs. |
+| C7 | Duplicate loss callbacks, including old-generation callback after resume | No deadline extension; old connection cannot detach the newly bound session. |
+| C8 | Fatal error while sending ERROR or a DISCONNECT acknowledgement | No recursive error-send loop; original outcome retained; cleanup completes. |
+| C9 | Send-all failure with unknown progress | No same-stream whole-frame retry, action replay, or old-suffix transfer to reconnect. |
+| C10 | Write/close-flush budget expires | Retire transport within budget; gameplay/timers for the other player continue. |
+| C11 | Shutdown/close raises while retiring a connection | Log diagnostic; finish cleanup; no new outcome or grace reset. |
+| C12 | EOF/error on unbound or rejected reconnect attempt | Existing player's reserved session and deadline remain unchanged. |
+| C13 | Second player loses connection while match already paused | Preserve saved gameplay phase; independent grace deadlines. |
+| C14 | Client sends quit but message is lost before server processing | Client stops reconnecting; server uses interruption/grace, not assumed immediate forfeit. |
+
+API references: [Python socket HOWTO](https://docs.python.org/3/howto/sockets.html), [socket API including partial sends and sendall failure](https://docs.python.org/3/library/socket.html), and [OS exception classifications](https://docs.python.org/3/library/exceptions.html). EOF and exception semantics come from the socket API; half-close rejection, timeout classification, output budgets, and game consequences are application design decisions.
+
 ## 7. Wire examples
 
 Each line below depicts one entire frame. The final two displayed characters backslash-n stand for one actual LF byte, not two literal bytes. Tokens/IDs are illustrative, not credentials. Examples are independent unless stated otherwise.
@@ -258,4 +346,4 @@ Proposed instruction for a future implementation request:
 
 This instruction makes adherence reviewable; it does not guarantee generated code is correct without verification.
 
-Minimum future conformance checks: fragmented/coalesced frames; 4,096/4,097 byte boundary; multibyte UTF-8 byte counting; missing/extra/wrong-type fields; forced-pass rejection; loading limits and inventory; old revision rejected after a lost response; resume during every active phase; timeout boundary; terminal result immutability; absence of private opponent/cylinder/reward fields. Use scenario expectations in the FSM as behavioral checks, rather than tests that merely repeat implementation code.
+Minimum future conformance checks: fragmented/coalesced frames; 4,096/4,097 byte boundary; multibyte UTF-8 byte counting; missing/extra/wrong-type fields; forced-pass rejection; loading limits and inventory; old revision rejected after a lost response; resume during every active phase; timeout boundary; terminal result immutability; absence of private opponent/cylinder/reward fields. Use scenario expectations in the FSM and transport cases C1–C14 as behavioral checks, rather than tests that merely repeat implementation code.
