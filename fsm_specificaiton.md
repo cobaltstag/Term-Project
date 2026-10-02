@@ -5,7 +5,7 @@
 **Updated:** 2026-10-02  
 **Status:** Review draft. This filename preserves the requested spelling.
 
-Use with [protocol_blueprint.md](protocol_blueprint.md). Its D1–D9 choices remain proposals. This document specifies behavior, not a threading library or socket implementation.
+Use with [protocol_blueprint.md](protocol_blueprint.md). Its D1–D6 and D8–D10 choices remain proposals. D7 is resolved: bidirectional correlated heartbeats with a ten-second response deadline. This document specifies behavior, not a threading library or socket implementation.
 
 ## 1. Authoritative state
 
@@ -23,6 +23,7 @@ Use with [protocol_blueprint.md](protocol_blueprint.md). Its D1–D9 choices rem
 | dare_initiator | PlayerId or null | Retained through the forced exchange; server only. |
 | saved_phase | Active Phase or null | Exact phase to restore after interruption. Public as resume_phase while paused. |
 | sessions | Seat, token, current connection, status, deadline | Credentials server/owner only; connection status public. |
+| heartbeat[connection] | Generation, next probe ID, pending ID, deadline, scheduling tick | Connection-control state only; no gameplay revision changes on successful exchange. |
 | terminal_result | Null or fixed winner, loser, reason, terminal revision | Immutable once resolved. Public. |
 
 Inventory and reward cycle are per player, not per global turn. There is no survival reward for PASS. No loaded chamber can become empty except through a fatal shot; that shot ends the two-player match.
@@ -45,7 +46,7 @@ stateDiagram-v2
     TURN_CHOICE --> GAME_OVER: TRIGGER loaded / opponent wins
     FORCED_REPLY --> GAME_OVER: TRIGGER loaded / opponent wins
     FORCED_RETURN --> GAME_OVER: TRIGGER loaded / opponent wins
-    TURN_CHOICE --> PAUSED: Detected connection loss
+    TURN_CHOICE --> PAUSED: EOF, fatal error, or heartbeat expiry
     FORCED_REPLY --> PAUSED: Detected connection loss
     FORCED_RETURN --> PAUSED: Detected connection loss
     LOAD --> PAUSED: Detected connection loss
@@ -58,7 +59,7 @@ stateDiagram-v2
     CLEANUP --> WAITING_FOR_PLAYERS: Fresh lobby and tokens
 ```
 
-An intentional DISCONNECT reaches GAME_OVER from every active phase, including PAUSED; it is omitted from individual arrows to keep the diagram readable. Protocol errors do not advance gameplay.
+An intentional DISCONNECT reaches GAME_OVER from every active phase, including PAUSED; it is omitted from individual arrows to keep the diagram readable. Protocol errors do not advance gameplay. Successful PING/PONG exchanges are connection-control operations available in all bound non-closing phases; they do not transition gameplay.
 
 ## 3. States and accepted actions
 
@@ -87,7 +88,7 @@ Only the active player's bound current connection may submit gameplay actions. W
 | T6 | LOAD; valid END_TURN | Spend nothing; advance according to load_context; increment turn and revision | Same destination rules as T5; STATE_UPDATE/TURN_READY |
 | T7 | Active/paused match; intentional DISCONNECT | Sender forfeits; opponent wins even if disconnected; freeze FORFEIT result | GAME_OVER; results to writable peers; departing client's acknowledgement/closure |
 | T8 | Invalid well-framed gameplay request | No cylinder/inventory/cycle/turn/phase change | ERROR; current private snapshot to sender |
-| T9 | Detected transport loss during active phase | Preserve current phase/turn/context; reserve seat; start that session's deadline; increment revision | PAUSED; connected opponent receives CONNECTION_LOST snapshot |
+| T9 | EOF, fatal socket error, or ten-second heartbeat response expiry during active phase | Preserve current phase/turn/context; reserve seat; start that session's deadline; increment revision | PAUSED; connected opponent receives CONNECTION_LOST snapshot |
 | T10 | Valid resume before deadline | Bind new connection, fence old connection, restore retained data; increment revision | WELCOME and immediate snapshot; restore saved phase only if both online |
 | T11 | Active player's grace expires; opponent online | Freeze win for opponent, loss for absent player, RECONNECT_TIMEOUT | GAME_OVER; terminal snapshot and GAME_OVER |
 | T12 | Active player's grace expires; opponent disconnected | Freeze no-winner MATCH_ABORTED result | GAME_OVER; deliver if any peer later resumes during retention |
@@ -114,10 +115,10 @@ Before match start: interruption reserves the lobby seat for grace without chang
 
 After match end: hold terminal state for the proposed 30-second retention. A disconnected player with an unexpired retained session can resume, receive WELCOME, their terminal snapshot, and GAME_OVER. Invalidate all sessions at cleanup. No automatic replay/rematch is specified.
 
-If server detection misses a silent broken link, recovery cannot begin yet. The heartbeat/liveness policy remains an explicit implementation decision, not an assumed behavior.
+Both endpoints use correlated PING/PONG to detect silent unresponsive links, as specified by protocol H1–H7. Response deadline is ten seconds after a complete probe is submitted; scheduling interval remains a five-second proposal. Expiry triggers the existing transport-loss transition, not immediate forfeit. Heartbeat response/probe handling continues during console input and gameplay pauses; successful exchanges never advance state_revision.
 
 
-Transport observations are classified by protocol section 6.1 before triggering T9. EOF from a positive-size receive and fatal established-socket read/write errors cause interruption; would-block, short positive I/O, retryable interruption, and receive polling timeouts do not. A TCP half-close without a processed valid DISCONNECT is interruption, not forfeit.
+Transport observations are classified by protocol section 6.1 before triggering T9. EOF from a positive-size receive, fatal established-socket read/write errors, and matching-response heartbeat deadline expiry cause interruption; would-block, short positive I/O, retryable interruption, and receive polling timeouts do not. A TCP half-close without a processed valid DISCONNECT is interruption, not forfeit.
 
 Retirement must follow protocol R5/R6 exactly once per connection binding. Duplicate/old callbacks cannot extend deadlines or detach a resumed connection. If loss occurs while PAUSED, preserve saved_phase/load_context rather than overwriting saved_phase with PAUSED. An already committed T3–T6 action remains committed when its notification write fails. Complete received frames preceding EOF are processed in stream order until intentional/protocol closure; discard any final incomplete suffix. Output/cleanup budgets remain proposal D9.
 
@@ -163,8 +164,8 @@ These are specification examples for future verification, not executable tests o
 | S19 | Lost lobby connection resumes vs expires | Resume restores seat; expiry releases it; no match winner is invented. |
 | S20 | Superseded connection sends a late MOVE after resume | It cannot mutate the rebound session or game. |
 
-Transport-specific checks C1–C14 in protocol section 6.6 supplement S1–S20, including EOF vs intent, partial writes, recoverable exceptions, loss callback idempotency, and failed cleanup.
+Transport-specific checks C1–C14 in protocol section 6.6 supplement S1–S20, including EOF vs intent, partial writes, recoverable exceptions, loss callback idempotency, and failed cleanup. Heartbeat cases HSC1–HSC12 in section 6.7 additionally verify exact response matching, ten-second expiry, background progress, and connection-generation isolation.
 
 ## 8. Review boundary
 
-Before declaring these documents final, resolve D1–D9 and inspect schema examples against the transition table. Then record the approved version in the implementation instruction in the protocol blueprint. Any future generated implementation must explain unresolved conflicts rather than silently invent rules.
+Before declaring these documents final, resolve remaining D1–D6 and D8–D10 and inspect schema examples against the transition table. Then record the approved version in the implementation instruction in the protocol blueprint. Any future generated implementation must explain unresolved conflicts rather than silently invent rules.
