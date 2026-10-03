@@ -1,31 +1,34 @@
-# Application Protocol Blueprint — Draft v1
+# Application Protocol Blueprint — v1
 
 **Project:** CS 457 Term-Project  
 **Author:** Andrew Barton (design decisions developed with ChatGPT)  
 **Updated:** 2026-10-02  
-**Status:** Review draft; no socket implementation is included.
+**Status:** Submission candidate; design decisions resolved; implementation verification remains future work.
 
 ## 1. Scope and decision status
 
 The confirmed design uses two players, server-controlled state, independent random chamber sampling, the forced-shot dare sequence, banked inventory, and the private repeating survival reward cycle. Intentional departure forfeits; interrupted connections permit reconnection. UTF-8 JSON with newline framing is selected. Application-level, bidirectional PING/PONG heartbeats with a ten-second matching-response deadline are now selected; this deadline verifies connection responsiveness and never limits how long a player may think.
 
-The detailed schemas below are proposed for review, not claims that the student has already approved every field. These remaining design choices must be resolved before implementation:
+The following v1 choices are resolved. D1–D6 and D8–D10 were confirmed during the final review; D7 was confirmed when heartbeats were selected. Later implementation work must follow these values unless the design is explicitly revised.
 
-| ID | Proposed choice | Reason |
+| ID | Final decision | Purpose |
 |---|---|---|
-| D1 | Maximum JSON object size: 4,096 UTF-8 bytes, excluding LF. | A bound on buffering; small messages remain small. |
-| D2 | Reconnection grace: 30 seconds from server detection of loss, measured with a monotonic clock. | Concrete, configurable recovery window. |
-| D3 | Pause active gameplay while either player is disconnected; retain phase and forced-turn obligations. | Prevent the opponent taking actions during recovery. |
-| D4 | One accepted LOAD or END_TURN ends the post-survival loading phase. | A single loading decision per survival; no extra confirmation message. |
-| D5 | Start both inventories at zero and both reward positions at the first entry. | Establish a complete initial state. |
-| D6 | Retain terminal results and session tokens for 30 seconds before cleanup; no rematches or simultaneous rooms in v1. | Permit recovery of a result that was missed during interruption. |
-| D8 | If one player times out while the opponent is also disconnected, abort with no winner. | Avoid awarding a win to an absent player. |
-| D9 | Five-second per-frame write-completion, close-flush, and client quit-wait budgets. | Bound stalled output/cleanup; distinct from reconnect grace and receive polling. |
-| D10 | Five-second probe scheduling interval. | Starting value for the selected heartbeat; interval is separate from the approved ten-second response deadline. |
+| D1 | 4,096 UTF-8 bytes maximum per JSON object, excluding LF. | Bounded framing. |
+| D2 | 30-second server reconnection grace from detected loss. | Recovery window. |
+| D3 | Pause active gameplay while either player is disconnected; preserve exact phase and obligations. | Fair recovery. |
+| D4 | One accepted LOAD or END_TURN finishes the post-survival loading phase. | One loading decision. |
+| D5 | Zero starting inventory; each player's first survival reward is one. | Complete initial state. |
+| D6 | Retain terminal results/tokens for 30 seconds; one room, one match at a time; no automatic rematch. | Missed-result recovery and cleanup. |
+| D7 | Bidirectional PING/PONG, exact probe pairing, ten-second response deadline. | Detect unresponsive peers. |
+| D8 | If both players are disconnected when the earliest grace expires, abort without a winner. | Deterministic no-winner outcome. |
+| D9 | Five-second frame-output, close-flush, and client quit-wait budgets. | Bounded output/cleanup. |
+| D10 | Five-second heartbeat scheduling ticks; at most one pending probe per direction. | Background liveness checks. |
 
-D7 is resolved: use paired bidirectional PING/PONG, a ten-second response deadline, and the H1–H7 rules below. D10 proposes the interval between probe opportunities; it does not change that response deadline.
+Multiplayer expansion, UI tutorials, persistent scores, server-crash recovery, and program implementation are outside this document. Language and concurrency-library selection belong to later SOW sprints.
 
-Do not implement an unresolved proposal as an approved requirement. Multiplayer expansion, UI tutorials, score persistence, and socket boilerplate are outside this document.
+### 1.1 Lab endpoint
+
+Use TCP at the lab DNS name `server.barton.edu`, default port `45700`. The server binds its configured CML interface (or all local interfaces); clients use that DNS name and the same port. Host and port may be overridden consistently through configuration for testing. The port is a project-local default, not a claim of an assigned Internet service. Application messages contain no hostname or port fields.
 
 ## 2. Authority and visibility
 
@@ -43,7 +46,7 @@ Do not implement an unresolved proposal as an approved requirement. Multiplayer 
 
 **F1.** TCP carries UTF-8 JSON objects. Exactly one object occupies each line. Append exactly one LF byte (hex 0A) after the closing object; do not send CRLF, a BOM, blank lines, pretty-printed multiline JSON, or trailing whitespace.
 
-**F2.** Proposed maximum: 4,096 bytes before LF, measured after UTF-8 encoding. It is a ceiling, not a padded allocation or minimum. A 150-byte object transmits 151 application bytes including LF.
+**F2.** Maximum: 4,096 bytes before LF, measured after UTF-8 encoding. It is a ceiling, not a padded allocation or minimum. A 150-byte object transmits 151 application bytes including LF.
 
 **F3.** Retain incoming bytes until LF. For each complete line, enforce the limit, decode strict UTF-8, and parse one complete JSON object. Keep any unfinished suffix. Drain all complete lines in order. Reads and TCP packets are not message boundaries.
 
@@ -67,7 +70,7 @@ Every message requires these three fields; all other keys are forbidden unless s
 
 MOVE additionally requires top-level turn_id and state_revision. No other message uses those top-level fields.
 
-Numbers described as integers must be finite whole JSON numbers, not booleans, strings, null, or fractional numbers. Client encoders use ordinary integer notation. Nonnegative counters have no gameplay-imposed cap; implementations must preserve exact values rather than silently overflow. Frame bounds still apply.
+Numbers described as integers must use JSON integer notation without a decimal point or exponent; booleans, numeric strings, null, and negative zero are invalid. Nonnegative fields use 0 or an unsigned nonzero decimal integer; positive fields exclude 0. Nonnegative counters have no gameplay-imposed cap; implementations must preserve exact values rather than silently overflow. Frame bounds still apply.
 
 | Named type | Definition |
 |---|---|
@@ -87,16 +90,16 @@ All listed fields are required unless explicitly described as conditional. Direc
 
 ### CONNECT — client -> server
 
-Payload: empty object. Valid only as the first complete message on a fresh, unbound connection. Assign an available seat and send WELCOME. If both seats are occupied or reserved, send ROOM_FULL and close this unbound connection. No state is restored through CONNECT. An accepted join increments the revision, sends lobby notifications/snapshots if still waiting, or executes match initialization if both seats are online.
+Payload: empty object. Valid only as the first complete message on a fresh, unbound connection. Assign the lowest available seat (P1 before P2), initialize its inventory/reward position to zero, and send WELCOME before any other message to that connection. If both seats are occupied or reserved, send ROOM_FULL and close this unbound connection. No state is restored through CONNECT. Each accepted join increments the revision once. If still waiting, send lobby notifications/snapshots; if both seats are online, execute match initialization as one additional revision. Thus initial joins produce revisions 1 and 2, and initial GAME_START snapshots have revision 3.
 
 ### RECONNECT — client -> server
 
 | Payload field | Type | Constraint |
 |---|---|---|
 | match_id | MatchId | Must identify the retained lobby/match. |
-| session_token | SessionToken | Must identify a disconnected, unexpired session. |
+| session_token | SessionToken | Must identify an eligible retained session: disconnected within gameplay/lobby grace, or not currently online within terminal-result retention. |
 
-Valid only as the first complete message on a fresh connection. Invalid, expired, or already-connected sessions receive RESUME_DENIED and closure of the new connection. On success send WELCOME, then the current authorized snapshot immediately. If resuming a terminal match, send GAME_OVER after the snapshot. Never recreate inventory, reroll a shot, award a reward, or clear forced-turn obligations during reconnection.
+Valid only as the first complete message on a fresh connection. Invalid or expired credentials receive RESUME_DENIED and closure of the new connection. A valid credential whose old connection is still considered ONLINE receives RESUME_BUSY and closure of only the new connection; it does not replace that old connection or extend grace. On success send WELCOME, then the current authorized snapshot immediately. If resuming a terminal match, send GAME_OVER after the snapshot. Terminal eligibility uses the 30-second result-retention deadline even if gameplay grace expired; it restores access to the result, never to gameplay. Never recreate inventory, reroll a shot, award a reward, or clear forced-turn obligations during reconnection.
 
 ### PING — either direction
 
@@ -144,7 +147,7 @@ Follow with a STATE_UPDATE containing lobby state. Two connections can be presen
 | match_id | MatchId | Match being started. |
 | first_player_id | PlayerId | Server's randomized first player. |
 
-Follow with recipient-specific STATE_UPDATE. This message is emitted once per match, not replayed on reconnection.
+Follow with recipient-specific STATE_UPDATE. This message is emitted once per match, not replayed on reconnection. At start, increment the lobby revision once, set turn_id to 1, and ensure WELCOME precedes GAME_START for the second joining client.
 
 ### MOVE — client -> server
 
@@ -159,7 +162,7 @@ TRIGGER and PASS are accepted only in TURN_CHOICE; forced phases permit TRIGGER 
 
 One accepted LOAD deducts exactly count, fills that many distinct empty chambers chosen randomly by the server, then hands over the turn. END_TURN hands over without spending. Both preserve reward position. Invalid requests spend nothing and retain the phase.
 
-Validate serially in this order: envelope/schema; session; match active/not paused; revision; turn; sender active; action allowed; count limits. Apply an accepted action and all its effects atomically before processing another event. No automatic MOVE retries are part of v1: after interruption obtain a fresh snapshot before issuing any new action. A duplicate accepted action carrying its old revision is rejected as STALE_STATE, not executed twice.
+Validate serially in this order: envelope/schema; session; match active/not paused; revision; turn; sender active; action allowed; count limits. Apply an accepted action and all its effects atomically before processing another event. No automatic MOVE retries are part of v1: after interruption obtain a fresh snapshot before issuing any new action. Only current-session client MOVE enters this validation sequence; transport controls use their own guards. A duplicate accepted action is never executed twice. It receives MATCH_NOT_ACTIVE or MATCH_PAUSED when those earlier guards apply, otherwise STALE_STATE for its old revision.
 
 ### STATE_UPDATE — server -> each connected assigned client individually
 
@@ -168,14 +171,14 @@ Validate serially in this order: envelope/schema; session; match active/not paus
 | match_id | MatchId | Current match/lobby. |
 | state_revision | Revision | Current authoritative revision. |
 | phase | Phase | Current state. |
-| resume_phase | Phase or null | Previous active phase when PAUSED; otherwise null. Cannot be PAUSED or GAME_OVER when non-null. |
+| resume_phase | Phase or null | Previous active phase when PAUSED; otherwise null. When non-null, exactly TURN_CHOICE, FORCED_REPLY, FORCED_RETURN, or LOAD. |
 | turn_id | Integer or null | TurnId during active/paused match; null before start or after terminal outcome. |
 | active_player_id | PlayerId or null | Preserved during pause; null in lobby/terminal state. |
-| allowed_actions | Array of strings | Legal action names for this recipient's current phase. Empty when inactive, paused, waiting, or terminal. |
+| allowed_actions | Array of strings | Unique legal action names, ordered TRIGGER/PASS or LOAD/END_TURN as applicable. Empty when inactive, paused, waiting, or terminal. |
 | self | Object | Exactly player_id: PlayerId and inventory: Inventory. |
-| players | Array of objects | One per occupied/reserved seat; each has player_id: PlayerId and connection: ONLINE, DISCONNECTED, or LEFT. No private data. |
+| players | Array of objects | One per occupied/reserved seat (both seats retained at GAME_OVER), sorted P1 then P2 with no duplicates; each has player_id: PlayerId and connection: ONLINE, DISCONNECTED, or LEFT. No private data. |
 | event | String | SNAPSHOT, MATCH_STARTED, PASSED, SURVIVED, TURN_READY, CONNECTION_LOST, RESUMED, or MATCH_ENDED. |
-| reconnect_remaining_ms | Integer or null | Nonnegative remaining time to earliest disconnected active session deadline; null if none. Informational, server clock controls expiry. |
+| reconnect_remaining_ms | Integer or null | Nonnegative milliseconds to earliest reserved lobby/gameplay grace deadline, rounded up and clamped at zero; null if none or phase GAME_OVER. Informational only; the server clock controls expiry. |
 
 TURN_CHOICE permits TRIGGER and PASS. FORCED_REPLY/FORCED_RETURN permit TRIGGER. LOAD advertises LOAD only if the recipient has positive inventory, and always END_TURN; do not condition the advertised LOAD action on secret cylinder capacity. Validation enforces capacity. Allowed actions describe gameplay only; DISCONNECT can be sent separately in any bound session.
 
@@ -210,7 +213,7 @@ This is acknowledgement/closure notification, not a client gameplay command. A s
 | Payload field | Type | Constraint |
 |---|---|---|
 | code | String | Code from the table below. |
-| detail | String | Human explanation, 1–160 characters, with no secrets. |
+| detail | String | Human explanation, 1–160 Unicode code points, with no secrets. |
 | fatal | Boolean | Whether this connection will be closed. |
 
 | Code | Meaning | Fatal |
@@ -221,7 +224,8 @@ This is acknowledgement/closure notification, not a client gameplay command. A s
 | INVALID_SCHEMA | Missing, extra, wrong-type, or invalid-enum field. | false |
 | HANDSHAKE_REQUIRED | MOVE/DISCONNECT before binding; or inappropriate first type. | true |
 | ROOM_FULL | No available seat. | true |
-| RESUME_DENIED | Invalid/expired/in-use resume credential. | true |
+| RESUME_DENIED | Invalid or expired resume credential. | true |
+| RESUME_BUSY | Valid credential, but old connection is still ONLINE; retry policy in R8. | true |
 | MATCH_NOT_ACTIVE | No active game or already terminal. | false |
 | MATCH_PAUSED | Gameplay frozen for reconnection. | false |
 | STALE_STATE | Revision mismatch. | false |
@@ -230,20 +234,32 @@ This is acknowledgement/closure notification, not a client gameplay command. A s
 | ACTION_NOT_ALLOWED | Action invalid in current phase; includes repeated CONNECT/RECONNECT on bound connection. | false |
 | LOAD_LIMIT | Count exceeds inventory or cylinder space; do not say which hidden capacity failed. | false |
 
+Here fatal means close the offending connection, not immediate player forfeit; an assigned session follows R5/R6 unless a terminal/intentional-close result already exists. Version must first be a syntactically valid integer: wrong type is INVALID_SCHEMA, while an unsupported integer is UNSUPPORTED_VERSION. Unknown message names/fields are INVALID_SCHEMA. A known server-only type sent by a bound client is ACTION_NOT_ALLOWED; a correctly formed type other than CONNECT/RECONNECT on an unbound connection is HANDSHAKE_REQUIRED. Clients do not send ERROR messages: malformed/wrong-direction server input causes client-side retirement and recovery without an ERROR loop.
+
 After a nonfatal MOVE error send the sender a fresh STATE_UPDATE with event SNAPSHOT. Schema errors without a bound session receive ERROR only. Count <= 0 or noninteger is INVALID_SCHEMA, not LOAD_LIMIT.
+
+### 5.1 State ordering and publication
+
+On every accepted gameplay transition, update all authoritative fields and increment state_revision exactly once before constructing per-recipient snapshots. Snapshot replies to errors do not increment it. Heartbeat success never increments it. A connection-status change has its own revision; serialize it with gameplay. Frame order on each connection follows that commit order.
+
+Lobby snapshots use inventory 0, turn_id/active_player_id/resume_phase null, no allowed_actions, and phase WAITING_FOR_PLAYERS. Occupied seats, including reserved disconnected ones, appear in players. A seat addition/removal/resume/loss increments revision and notifies existing connected peers with a current snapshot. LOBBY_WAIT accompanies remaining lobby waiting; do not start until both seats are online.
+
+Entering GAME_OVER sets phase GAME_OVER, active_player_id/turn_id/resume_phase null, allowed_actions empty, clears transient load/dare/pause obligations and all gameplay grace timers, and preserves inventories for private snapshots. Record the terminal outcome/revision once. Send terminal STATE_UPDATE before GAME_OVER to each writable peer. Later connection changes may advance snapshot revision but cannot change the frozen terminal result.
+
+A client applies complete snapshots atomically and discards older revisions on the same match. Equal revisions are permitted for repeated snapshot delivery. GAME_OVER's frozen outcome revision may be lower than the latest snapshot after result recovery; do not discard that result merely for this difference. The same connection's pending local MOVE is never automatically replayed.
 
 ## 6. Connection interruption and forfeit
 
-Proposed recovery policy:
+Recovery policy:
 
 1. At detected EOF/transport failure on the current bound connection, mark the player disconnected, reserve their session, and start their 30-second monotonic deadline. Ignore events from superseded connections.
 2. Pause active gameplay and save the exact prior phase, active player, turn, revision, inventory, cylinder and dare obligations. Notify the remaining connected player by STATE_UPDATE. Do not reveal private saved state.
-3. Accept RECONNECT strictly before that player's deadline; at equality timeout wins. Valid resume rebinds the session and sends its snapshot. Resume gameplay only when both players are online. Send each connected player a fresh recipient-specific STATE_UPDATE whenever session status changes, including the remaining peer when gameplay resumes.
-4. A second connection loss receives its own deadline. Invalid resume attempts do not extend a deadline. Repeated valid interruptions get a new grace window; imposing an anti-stalling budget is outside the current proposal.
+3. For an ongoing match/lobby, accept RECONNECT strictly before that player's grace deadline; at equality timeout wins. Once the match is terminal, use the result-retention deadline instead. Valid resume rebinds the session and sends its snapshot. Resume gameplay only when both players are online. Send each connected player a fresh recipient-specific STATE_UPDATE whenever session status changes, including the remaining peer when gameplay resumes.
+4. A second connection loss receives its own deadline. Invalid resume attempts do not extend a deadline. Repeated valid interruptions get a new grace window; imposing an anti-stalling budget is outside v1.
 5. If an active player's deadline expires while the opponent is online, declare RECONNECT_TIMEOUT and award the opponent the win. If the opponent is also disconnected, declare MATCH_ABORTED. Terminal outcomes are frozen.
 6. Lobby interruption reserves the seat for the same grace window. Expiry releases it without a win/loss. Both seats must be connected before starting.
 7. Intentional DISCONNECT bypasses grace. If the opponent is disconnected, still record them as the winner and retain that result for possible resume.
-8. Retain terminal state/tokens for 30 seconds from terminal resolution, send results on valid reconnect during retention, then notify writable peers with DISCONNECT/MATCH_CLOSED, close connections, invalidate tokens and clean up.
+8. Retain terminal state and both tokens for 30 seconds from terminal resolution, independently of expired gameplay grace. Permit result-only recovery for any non-ONLINE retained seat, including LEFT; send results on valid reconnect during retention, then notify writable peers with DISCONNECT/MATCH_CLOSED, close connections, invalidate tokens and clean up.
 
 A server process crash and recovery from disk are outside v1. Grace begins at detection, not at the unknowable instant the physical connection failed. A matching-response heartbeat timeout is now another loss detector; section 6.7 specifies it. The ten-second heartbeat deadline is not the reconnection grace period.
 
@@ -286,7 +302,7 @@ For a partially written frame, retain known offsets only while the same live con
 
 If a send-all API raises, the delivered byte count can be unknown. Do not restart the same frame from byte zero on that stream or automatically replay its associated action. Retire the failed connection and recover by snapshot. An ERROR or DISCONNECT acknowledgement whose send fails is best-effort; its failure never changes a previously committed forfeit or terminal result.
 
-**R4 — Bounded output, proposed D9.** Each outgoing frame has a five-second monotonic write-completion budget beginning at its first write attempt; partial progress does not restart it. A transient would-block observation before this deadline is recoverable. Deadline expiry classifies the connection as failed output. A server-requested close also has a five-second total flush budget beginning when closure is decided; queue final control/result frames in order, then close when output completes, a fatal write occurs, or that budget expires. Use the earlier applicable deadline. Do not wait indefinitely for a peer acknowledgement or FIN. No blocking network I/O or flush may hold the authoritative-state lock or prevent the server processing another session's events/timers.
+**R4 — Bounded output (D9).** Each outgoing frame has a five-second monotonic output budget beginning when it is queued for transmission, including queue residence and writes; partial progress does not restart it. This prevents a queued heartbeat from waiting indefinitely before its response timer can begin. A transient would-block observation before this deadline is recoverable. Deadline expiry classifies the connection as failed output. A server-requested close also has a five-second total flush budget beginning when closure is decided; queue final control/result frames in order, then close when output completes, a fatal write occurs, or that budget expires. Use the earlier applicable deadline. Do not wait indefinitely for a peer acknowledgement or FIN. No blocking network I/O or flush may hold the authoritative-state lock or prevent the server processing another session's events/timers.
 
 This budget bounds output attempts; heartbeat probes provide traffic and a separate matching-response deadline to detect quiet unresponsive connections. It is distinct from reconnection grace, receive polling, and terminal-result retention.
 
@@ -300,7 +316,7 @@ This budget bounds output attempts; heartbeat probes provide traffic and a separ
 4. Remove transport buffers/queues belonging to the retired connection. Queue authorized snapshots for remaining peers; process any resulting peer write failure as a separate session loss rather than recursively performing network I/O inside this transition.
 5. Best-effort shutdown and close the socket explicitly. Log cleanup errors; they cannot escape cleanup, restart grace, alter a match result, or prevent cleanup of the other connection.
 
-Unbound connections skip all match/session mutation. Lobby sessions use the reserved-seat policy; terminal sessions preserve their fixed result and retention deadline. Cleanup is idempotent: EOF followed by write failure, multiple worker callbacks, or shutdown followed by close cannot create multiple loss transitions. The first detected loss time controls grace even if cleanup or notification fails.
+Unbound connections skip all match/session mutation. Lobby sessions use the reserved-seat policy. Terminal transport loss still marks an ONLINE seat DISCONNECTED and advances the snapshot revision, enabling result-only recovery; it preserves the fixed result/reason/terminal revision and retention deadline and never starts gameplay grace. Intentional departures set LEFT; releasing a lobby seat removes it from players instead. Cleanup is idempotent: EOF followed by write failure, multiple worker callbacks, or shutdown followed by close cannot create multiple loss transitions. The first detected loss time controls grace even if cleanup or notification fails.
 
 **R6.** Mark server-requested closing connections as closing, stop accepting their input, and record the closure cause before flushing/closing. After processed client DISCONNECT, outcome/seat release is committed before final messages are attempted. After fatal protocol validation, an assigned active/lobby session follows the existing interruption policy immediately, while a single diagnostic ERROR may be flushed within R4; stop parsing subsequent frames. This closing socket is output-only: it cannot accept gameplay or restart grace. If an outgoing frame was already partially written, finish its remaining bytes before the diagnostic; if that cannot complete within budget, skip the diagnostic and close. No diagnostic may be inserted into the middle of an unfinished frame. A later resume may replace the session binding before this flush finishes; old-socket cleanup still cannot affect the new binding. After normal match cleanup, never reopen grace for a resulting EOF or exception.
 
@@ -310,9 +326,15 @@ Expected already-disconnected/already-closed errors during shutdown/close are cl
 
 **R7.** A client that detects unexpected EOF/fatal established-socket error without a received terminal/closure notification stops sending gameplay, discards that connection's partial buffers, and retains its last credential for a reconnect attempt. It cannot declare itself or the opponent the winner locally. After RECONNECT, wait for WELCOME and STATE_UPDATE before issuing a new MOVE; never automatically resend a potentially accepted action.
 
-A player choosing to quit sends the complete DISCONNECT frame, disables further actions and automatic reconnection, and attempts to receive the final result/acknowledgement. Proposed client quit-wait budget is five seconds from the quit request; close on acknowledgement, EOF/error, or expiry. If the server never processes the complete request, the server follows EOF/failure policy; the client's intention or successful local send cannot substitute for receipt.
+A player choosing to quit sends the complete DISCONNECT frame, disables further actions and automatic reconnection, and attempts to receive the final result/acknowledgement. Client quit-wait budget is five seconds from the quit request; close on acknowledgement, EOF/error, or expiry. If the server never processes the complete request, the server follows EOF/failure policy; the client's intention or successful local send cannot substitute for receipt.
 
-Received DISCONNECT/CLIENT_REQUEST or MATCH_CLOSED stops reconnection. Received GAME_OVER fixes the displayed result; subsequent closure does not imply an additional loss. No client reconnect retry schedule, connect timeout, or turn-inactivity deadline is selected. Heartbeat scheduling and response processing are specified in section 6.7.
+Received DISCONNECT/CLIENT_REQUEST or MATCH_CLOSED stops reconnection. Received GAME_OVER fixes the displayed result; subsequent closure does not imply an additional loss. Client retry and handshake deadlines are specified by R8 below. No turn-inactivity deadline is imposed: a responsive player can take time to think. Heartbeat scheduling and response processing are specified in section 6.7.
+
+**R8 — Bounded handshake and recovery attempts.** On each accepted TCP connection, the server allows five seconds to validate and bind a complete CONNECT or RECONNECT. Invalid frames do not restart this handshake deadline; expiry closes the unbound connection without allocating a seat or changing an existing session. A client allows five seconds for a connect attempt and, once connected, five seconds for WELCOME plus the initial STATE_UPDATE. Use the earlier applicable overall recovery deadline.
+
+After unexpected loss with known credentials, the client starts a local 30-second recovery-attempt window, tries RECONNECT immediately, and retries failed transport attempts or RESUME_BUSY one second after that attempt ends. Only one attempt may be in flight. Stop on successful WELCOME plus snapshot, RESUME_DENIED, deliberate quit, a terminal/closure notification, or local window expiry. Never resend an old MOVE. No failure/retry extends the server's grace. A busy response can occur because client and server detect failure at different times; heartbeat expiry will eventually retire an unresponsive old connection.
+
+The local client window begins at its own detection time and does not claim to equal the server's independently timed grace. A failed automatic recovery is reported as unavailable/unknown until the server returns a result; the client must not invent a winner. If WELCOME was never received on the initial connection, no credential is available: report the failed join and allow an explicit fresh join later; do not guess a token or automatically occupy another seat. A retained valid credential can be used in a later explicit result-recovery request while the server's terminal-retention window remains open.
 
 ### 6.6 Transport conformance scenarios
 
@@ -331,7 +353,11 @@ Received DISCONNECT/CLIENT_REQUEST or MATCH_CLOSED stops reconnection. Received 
 | C11 | Shutdown/close raises while retiring a connection | Log diagnostic; finish cleanup; no new outcome or grace reset. |
 | C12 | EOF/error on unbound or rejected reconnect attempt | Existing player's reserved session and deadline remain unchanged. |
 | C13 | Second player loses connection while match already paused | Preserve saved gameplay phase; independent grace deadlines. |
-| C14 | Client sends quit but message is lost before server processing | Client stops reconnecting; server uses interruption/grace, not assumed immediate forfeit. |
+| C14 | Client sends quit but message is lost before server processing | Client stops reconnecting; server uses interruption/grace, not assumed immediate forfeit. | 
+| C15 | Valid resume credential while old connection is still ONLINE | RESUME_BUSY closes only new attempt; bounded retries continue without changing old session/grace. |
+| C16 | Gameplay grace expires, then absent player reconnects during terminal retention | WELCOME, terminal snapshot, GAME_OVER; result only, no restarted game. |
+| C17 | Unbound client never completes handshake, or bound client never receives initial synchronization | Five-second handshake/sync timeout; no invented seat/result or automatic MOVE replay. |
+| C18 | Outgoing frame remains queued without a first write attempt | Five-second budget still expires; no indefinitely queued probe. |
 
 API references: [Python socket HOWTO](https://docs.python.org/3/howto/sockets.html), [socket API including partial sends and sendall failure](https://docs.python.org/3/library/socket.html), and [OS exception classifications](https://docs.python.org/3/library/exceptions.html). EOF and exception semantics come from the socket API; half-close rejection, timeout classification, output budgets, and game consequences are application design decisions.
 
@@ -340,7 +366,7 @@ API references: [Python socket HOWTO](https://docs.python.org/3/howto/sockets.ht
 
 **H1 — Connection control, not game state.** Both endpoints send PING and answer PING with PONG in the background. Heartbeats are bound to the existing session/connection; they contain only probe_id. Successful exchanges do not change phase, inventory, turn_id, reward position, or state_revision. Expiry changes connection status through R5 and may therefore pause the match and advance its revision.
 
-**H2 — Scheduling.** Proposed D10: maintain five-second monotonic scheduling ticks per bound connection. Start the server's schedule after successful CONNECT/RECONNECT binding; start the client's after WELCOME. The first probe opportunity is five seconds later. At a tick, create/send a probe only if that endpoint has no queued or awaiting-response probe. Otherwise skip the tick: do not overlap probes or resend a pending PING. After completion, the next regular tick can create a new identifier. Each direction has its own counter and pending record; identically numbered probes in opposite directions are distinct.
+**H2 — Scheduling (D10).** maintain five-second monotonic scheduling ticks per bound connection. Start the server's schedule after successful CONNECT/RECONNECT binding; start the client's after WELCOME. The first probe opportunity is five seconds later. At a tick, create/send a probe only if that endpoint has no queued or awaiting-response probe. Otherwise skip the tick: do not overlap probes or resend a pending PING. After completion, the next regular tick can create a new identifier. Each direction has its own counter and pending record; identically numbered probes in opposite directions are distinct.
 
 Probes and automatic responses continue during lobby waiting, turn deliberation, and PAUSED while that particular connection remains online. They may continue during terminal retention until closing. Stop scheduling for closing/retired connections; clear all pending/timer state on retirement, quit, or a new connection generation. Reconnection starts a fresh schedule/counter, with no carried-over deadline or response.
 
@@ -350,7 +376,7 @@ A matching PONG can be processed after transmission has started even if the loca
 
 **H4 — Exact pairing.** Validate the PONG envelope, integer identifier, current generation, and pending probe under serialized connection-control handling. When its deadline is armed, process a matching response strictly before it; equality is expired. Before the completion callback arms a deadline, use H3's early-response rule. Clear that pending record atomically on success. An incoming PING with the same numeric ID is still a request, never a response. Ignore well-framed stale/unmatched/unsolicited PONG; it cannot reset responsiveness timers.
 
-**H5 — Expiry.** At or after a pending deadline, if no matching response completed it, retire the current connection once using R5 with diagnostic cause HEARTBEAT_TIMEOUT. This cause is internal, not a new GAME_OVER reason or ERROR code. The server marks the session disconnected, pauses if required, and begins the separately proposed 30-second grace. A client stops gameplay and attempts session recovery using R7. Do not send a fatal ERROR down the timed-out stream or wait for further proof. A late PONG cannot revive the old connection or extend grace.
+**H5 — Expiry.** At or after a pending deadline, if no matching response completed it, retire the current connection once using R5 with diagnostic cause HEARTBEAT_TIMEOUT. This cause is internal, not a new GAME_OVER reason or ERROR code. The server marks the session disconnected, pauses if required, and begins the separate 30-second grace. A client stops gameplay and attempts session recovery using R7. Do not send a fatal ERROR down the timed-out stream or wait for further proof. A late PONG cannot revive the old connection or extend grace.
 
 With a five-second interval and prompt local scheduling/output, an idle silent failure can be noticed roughly up to fifteen seconds later (up to five until the next probe plus ten awaiting its response). That is not a ten-second end-to-end reconnection/forfeit promise. Output budgets, scheduling delays, and the separate grace period affect total elapsed time. Expiry means the connection is no longer responsive enough under this policy; it does not prove the remote process has crashed.
 
@@ -385,91 +411,44 @@ Each line below depicts one entire frame. The final two displayed characters bac
 {"version":1,"msg_type":"WELCOME","payload":{"match_id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","player_id":"P1","session_token":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","resumed":false}}\n
 {"version":1,"msg_type":"LOBBY_WAIT","payload":{"match_id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","connected_players":1,"required_players":2}}\n
 {"version":1,"msg_type":"GAME_START","payload":{"match_id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","first_player_id":"P1"}}\n
-{"version":1,"msg_type":"MOVE","turn_id":1,"state_revision":2,"payload":{"action":"PASS"}}\n
-{"version":1,"msg_type":"MOVE","turn_id":2,"state_revision":3,"payload":{"action":"TRIGGER"}}\n
-{"version":1,"msg_type":"MOVE","turn_id":2,"state_revision":4,"payload":{"action":"LOAD","count":1}}\n
-{"version":1,"msg_type":"MOVE","turn_id":2,"state_revision":4,"payload":{"action":"END_TURN"}}\n
-{"version":1,"msg_type":"STATE_UPDATE","payload":{"match_id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","state_revision":4,"phase":"LOAD","resume_phase":null,"turn_id":2,"active_player_id":"P2","allowed_actions":["LOAD","END_TURN"],"self":{"player_id":"P2","inventory":1},"players":[{"player_id":"P1","connection":"ONLINE"},{"player_id":"P2","connection":"ONLINE"}],"event":"SURVIVED","reconnect_remaining_ms":null}}\n
+{"version":1,"msg_type":"MOVE","turn_id":1,"state_revision":3,"payload":{"action":"PASS"}}\n
+{"version":1,"msg_type":"MOVE","turn_id":2,"state_revision":5,"payload":{"action":"TRIGGER"}}\n
+{"version":1,"msg_type":"MOVE","turn_id":2,"state_revision":5,"payload":{"action":"LOAD","count":1}}\n
+{"version":1,"msg_type":"MOVE","turn_id":2,"state_revision":5,"payload":{"action":"END_TURN"}}\n
+{"version":1,"msg_type":"STATE_UPDATE","payload":{"match_id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","state_revision":5,"phase":"LOAD","resume_phase":null,"turn_id":2,"active_player_id":"P2","allowed_actions":["LOAD","END_TURN"],"self":{"player_id":"P2","inventory":1},"players":[{"player_id":"P1","connection":"ONLINE"},{"player_id":"P2","connection":"ONLINE"}],"event":"SURVIVED","reconnect_remaining_ms":null}}\n
 {"version":1,"msg_type":"RECONNECT","payload":{"match_id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","session_token":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}}\n
 {"version":1,"msg_type":"WELCOME","payload":{"match_id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","player_id":"P1","session_token":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","resumed":true}}\n
 {"version":1,"msg_type":"DISCONNECT","payload":{}}\n
-{"version":1,"msg_type":"GAME_OVER","payload":{"match_id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","state_revision":8,"winner_id":"P2","loser_id":"P1","reason":"FORFEIT"}}\n
+{"version":1,"msg_type":"GAME_OVER","payload":{"match_id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","state_revision":7,"winner_id":"P2","loser_id":"P1","reason":"FORFEIT"}}\n
 {"version":1,"msg_type":"DISCONNECT","payload":{"reason":"CLIENT_REQUEST"}}\n
 {"version":1,"msg_type":"ERROR","payload":{"code":"ACTION_NOT_ALLOWED","detail":"This turn requires TRIGGER.","fatal":false}}\n
+{"version":1,"msg_type":"ERROR","payload":{"code":"RESUME_BUSY","detail":"Previous connection is still active; retry within recovery window.","fatal":true}}\n
+{"version":1,"msg_type":"DISCONNECT","payload":{"reason":"MATCH_CLOSED"}}\n
+{"version":1,"msg_type":"STATE_UPDATE","payload":{"match_id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","state_revision":6,"phase":"PAUSED","resume_phase":"LOAD","turn_id":2,"active_player_id":"P2","allowed_actions":[],"self":{"player_id":"P1","inventory":0},"players":[{"player_id":"P1","connection":"ONLINE"},{"player_id":"P2","connection":"DISCONNECTED"}],"event":"CONNECTION_LOST","reconnect_remaining_ms":30000}}\n
+{"version":1,"msg_type":"STATE_UPDATE","payload":{"match_id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","state_revision":9,"phase":"GAME_OVER","resume_phase":null,"turn_id":null,"active_player_id":null,"allowed_actions":[],"self":{"player_id":"P1","inventory":0},"players":[{"player_id":"P1","connection":"ONLINE"},{"player_id":"P2","connection":"ONLINE"}],"event":"SNAPSHOT","reconnect_remaining_ms":null}}\n
+{"version":1,"msg_type":"GAME_OVER","payload":{"match_id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","state_revision":8,"winner_id":"P2","loser_id":"P1","reason":"RECONNECT_TIMEOUT"}}\n
 ```
 
-The LOAD and END_TURN examples are alternatives, not two requests to execute in succession. Byte example: the CONNECT frame ends with hexadecimal 7D 7D 0A (two closing braces, then LF).
+The LOAD and END_TURN examples are alternatives, not two requests to execute in succession. The final two examples show result recovery: a revision-9 snapshot accompanies the already frozen revision-8 outcome. These are separate from the earlier forfeit example. Byte example: the CONNECT frame ends with hexadecimal 7D 7D 0A (two closing braces, then LF).
 
-## 8. Implementation contract and conformance
 
-Use this blueprint together with [fsm_specificaiton.md](fsm_specificaiton.md). The SOW provides course context. Resolve conflicts explicitly rather than choosing an interpretation silently.
+### 7.1 Connected-session revision trace
 
-**Current-stage boundary:** This work produces specifications, not socket boilerplate or the finished program. This restriction applies to the current design task. A later request for the finished program must explicitly authorize implementing its socket transport; the reusable prompt below includes that authorization.
+This trace assumes both joins succeed without connection events, P1 starts, and all actions are valid. It gives the wire examples' expected order; messages for each recipient use their private snapshot.
 
-### 8.1 Freeze the approved inputs
+| Step | Client input / server publication | Resulting revision, turn, phase |
+|---|---|---|
+| P1 joins | CONNECT -> WELCOME, LOBBY_WAIT, STATE_UPDATE | 1, null, WAITING_FOR_PLAYERS |
+| P2 joins | CONNECT -> WELCOME to P2; initialize then GAME_START and STATE_UPDATE to both | Seat addition 2, initialized snapshot 3, turn 1, TURN_CHOICE |
+| P1 dares | MOVE PASS with revision 3 / turn 1 -> STATE_UPDATE | 4, turn 2, FORCED_REPLY |
+| P2 survives | MOVE TRIGGER with revision 4 / turn 2 -> STATE_UPDATE | 5, turn 2, LOAD; P2 inventory 1 |
+| P2 loads | MOVE LOAD count 1 with revision 5 / turn 2 -> STATE_UPDATE | 6, turn 3, FORCED_RETURN; P2 inventory 0 |
+| P1 quits | DISCONNECT -> terminal STATE_UPDATE, GAME_OVER, then acknowledgement to P1 | 7, null, GAME_OVER; P2 wins FORFEIT |
 
-Before requesting implementation, settle the remaining proposals and record their approved status in the specifications. At present D1–D6 and D8–D10 remain proposals; D7 is resolved. This section does not approve those remaining values by itself.
+## 8. Conformance and related documents
 
-Identify the full Git commit SHA containing both approved specifications. A branch name or "latest version" alone is insufficient because its contents can change. The future agent must verify that it read the two files at that commit. Select the implementation language, concurrency approach, and permitted dependencies before implementation if those decisions have not already been made.
+Protocol behavior is checked by the message schemas, requirements A1–A5/F1–F6/R1–R8/H1–H7, transport cases C1–C18, heartbeat cases HSC1–HSC12, and FSM scenarios S1–S23 in [fsm_specification.md](fsm_specification.md). These are expected behaviors for future implementation verification, not claims of tests already executed.
 
-The pinned specifications define observable protocol/game behavior. Later user-approved changes require an explicit specification revision and a new identified baseline; implementation convenience is not authorization to revise them.
+Minimum coverage includes fragmented/coalesced frames; the 4,096/4,097 byte boundary; UTF-8 byte counting; missing/extra/wrong-type fields; invalid directions and states; forced-pass rejection; loading limits; stale revisions after a lost response; recovery during every phase; exact timeout boundaries; terminal-result immutability; and private-field exclusion.
 
-### 8.2 Reusable future implementation prompt
-
-Replace the bracketed inputs only after the design is approved. This is a prompt template for later use, not an instruction to implement code during the current task.
-
-> Implement the finished two-player console client/server program for CS 457 Term-Project.
->
-> Repository: cobaltstag/Term-Project. Approved specification commit: [FULL_COMMIT_SHA]. Read protocol_blueprint.md and fsm_specificaiton.md at that exact commit and confirm the baseline in your delivery report. Implementation language: [LANGUAGE]. Concurrency approach: [APPROVED_APPROACH]. Permitted dependencies: [APPROVED_DEPENDENCIES].
->
-> This future request authorizes the socket transport implementation needed for the finished program. Respect the specifications' two-player scope and deployment constraints.
->
-> Before generating implementation code, identify unresolved decisions, missing requirements, and contradictions. All remaining design proposals must have an approved resolution. Do not silently invent a rule or promote a proposal to a requirement.
->
-> Treat the approved protocol and FSM as the implementation contract. Preserve message names, directions, exact fields, types, limits, privacy boundaries, framing, validation order, heartbeat pairing/timing, connection termination behavior, game rules, and state transitions. Do not add messages, change the reward cycle, automatically retry gameplay actions, or introduce unsupported features.
->
-> Do not modify the specifications or weaken expected test outcomes to accommodate implementation behavior. If a conflict or missing requirement prevents compliance, identify the exact passages and propose a resolution before implementing the affected behavior. Ordinary implementation choices that preserve the contract may be made without further approval. Report any requirement you cannot meet.
->
-> Derive expected test outcomes from the specifications independently of the implementation's own calculations. Make randomness and time controllable within tests so documented fatal/survival outcomes, reward progression, deadline boundaries, and recovery cases can be exercised reliably. Test controls must not become undocumented wire messages or player-facing features.
->
-> Map requirements and documented scenarios to implementation locations and verification evidence. Run the relevant checks and report the actual commands executed, results, failures, and checks that remain unperformed. Do not describe written tests as executed, or passing tests as proof of requirements they did not exercise.
->
-> Deliver the complete program, run instructions for the approved environment, meaningful conformance checks, and the traceability/verification report described below. Correct implementation defects against the contract; propose specification changes separately.
-
-This instruction makes adherence reviewable; it does not guarantee generated code is correct without verification.
-
-### 8.3 Independent expected outcomes and controlled tests
-
-Use scenario expectations in the FSM (S1–S20), transport cases (C1–C14), and heartbeat cases (HSC1–HSC12) as the behavioral reference. A test must not obtain its expected result by calling the same rule implementation it is supposed to check.
-
-For example, S5 specifies rewards 1, 2, 4, 5, 1 and inventory totals 1, 3, 7, 12, 13 without spending. Assert those documented values rather than deriving the expected cycle through the production reward function. H4 requires an exact matching PONG: a mismatched response must leave the original deadline active.
-
-Provide controlled random outcomes and a controllable monotonic clock within the test environment. This enables repeatable loaded/empty chamber samples and checks immediately before, at, and after deadlines without relying on random luck or long real-time sleeps. Use those controls to exercise behavior, not merely to mirror implementation structure.
-
-Timing tests and parser/game tests do not substitute for real TCP integration checks. The final report must distinguish simulated/controlled checks from checks using actual socket connections.
-
-### 8.4 Requirement traceability and verification report
-
-Supply a compact table linking each protocol requirement/message constraint, FSM invariant/transition, and documented scenario to relevant implementation and evidence. Group related items where the mapping remains clear. Use exact field names and section references where a requirement lacks a numbered ID. Any uncovered requirement must be marked unverified rather than omitted.
-
-Illustrative table structure, to be completed against the delivered program:
-
-| Requirement or scenario | Implementation location | Verification evidence | Status / limitation |
-|---|---|---|---|
-| H4: exact heartbeat response pairing | [actual module/function] | [executed check: wrong probe_id cannot satisfy pending probe] | [result and any limits] |
-| R3 / S10: committed action survives response failure | [actual module/function] | [executed recovery scenario with lost response] | [result and any limits] |
-| A3: opponent/cylinder/reward privacy | [actual message construction locations] | [executed checks inspecting emitted payloads] | [result and any limits] |
-
-Record:
-
-- The approved specification commit and actual implementation revision.
-- Commands and relevant environment used for verification.
-- Observed results, including failures and incomplete checks.
-- Any unverified requirements, assumptions, or limitations.
-- Specification change proposals separately from implementation changes.
-
-### 8.5 Minimum conformance coverage
-
-Minimum future checks include fragmented/coalesced frames; the 4,096/4,097 byte boundary if that ceiling is approved; multibyte UTF-8 byte counting; missing/extra/wrong-type fields; forced-pass rejection; loading limits and inventory; old revisions rejected after a lost response; resume during every active phase; exact timeout boundaries; terminal-result immutability; absence of private opponent/cylinder/reward fields; and all documented transport/heartbeat cases.
-
-Passing a subset is evidence only for that subset. Fix failed implementation behavior and repeat the checks affected by the fix. If a requirement cannot be verified, state that explicitly; do not claim complete conformance.
+The reusable agent prompt, specification commit pinning, independent test expectations, and requirement-to-code-to-evidence reporting are maintained separately in [prompt_management.md](prompt_management.md). The [SOW](CS457_AndrewBarton_TermProjectSOW.md) provides course scope and later-sprint planning.
