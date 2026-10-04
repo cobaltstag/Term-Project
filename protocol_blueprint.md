@@ -9,21 +9,6 @@
 
 The confirmed design uses two players, server-controlled state, independent random chamber sampling, the forced-shot dare sequence, banked inventory, and the private repeating survival reward cycle. Intentional departure forfeits; interrupted connections permit reconnection. UTF-8 JSON with newline framing is selected. Application-level, bidirectional PING/PONG heartbeats with a ten-second matching-response deadline are now selected; this deadline verifies connection responsiveness and never limits how long a player may think.
 
-The following v1 choices are resolved. D1–D6 and D8–D10 were confirmed during the final review; D7 was confirmed when heartbeats were selected. Later implementation work must follow these values unless the design is explicitly revised.
-
-| ID | Final decision | Purpose |
-|---|---|---|
-| D1 | 4,096 UTF-8 bytes maximum per JSON object, excluding LF. | Bounded framing. |
-| D2 | 30-second server reconnection grace from detected loss. | Recovery window. |
-| D3 | Pause active gameplay while either player is disconnected; preserve exact phase and obligations. | Fair recovery. |
-| D4 | One accepted LOAD or END_TURN finishes the post-survival loading phase. | One loading decision. |
-| D5 | Zero starting inventory; each player's first survival reward is one. | Complete initial state. |
-| D6 | Retain terminal results/tokens for 30 seconds; one room, one match at a time; no automatic rematch. | Missed-result recovery and cleanup. |
-| D7 | Bidirectional PING/PONG, exact probe pairing, ten-second response deadline. | Detect unresponsive peers. |
-| D8 | If both players are disconnected when the earliest grace expires, abort without a winner. | Deterministic no-winner outcome. |
-| D9 | Five-second frame-output, close-flush, and client quit-wait budgets. | Bounded output/cleanup. |
-| D10 | Five-second heartbeat scheduling ticks; at most one pending probe per direction. | Background liveness checks. |
-
 Multiplayer expansion, UI tutorials, persistent scores, server-crash recovery, and program implementation are outside this document. Language and concurrency-library selection belong to later SOW sprints.
 
 ### 1.1 Lab endpoint
@@ -42,21 +27,21 @@ Use TCP at the lab DNS name `server.barton.edu`, default port `45700`. The serve
 
 **A5.** Bind player identity to the server's current connection/session. MOVE has no client-controlled player_id. A resumed session replaces its old connection; old connections are fenced from further mutations.
 
-## 3. Serialization and framing
+## 3. Serialization and framing - Newline Delimited
 
-**F1.** TCP carries UTF-8 JSON objects. Exactly one object occupies each line. Append exactly one LF byte (hex 0A) after the closing object; do not send CRLF, a BOM, blank lines, pretty-printed multiline JSON, or trailing whitespace.
+**F1.** TCP carries UTF-8 JSON objects. Exactly one object occupies each line. Append exactly one LF byte (0x0A) after the closing object; do not send CRLF, a BOM, blank lines, pretty-printed multiline JSON, or trailing whitespace.
 
-**F2.** Maximum: 4,096 bytes before LF, measured after UTF-8 encoding. It is a ceiling, not a padded allocation or minimum. A 150-byte object transmits 151 application bytes including LF.
+**F2.** Maximum: 4,096 bytes before 0x0A, measured after UTF-8 encoding. It is a ceiling, not a padded allocation or minimum. A 150-byte object transmits 151 application bytes including 0x0A.
 
-**F3.** Retain incoming bytes until LF. For each complete line, enforce the limit, decode strict UTF-8, and parse one complete JSON object. Keep any unfinished suffix. Drain all complete lines in order. Reads and TCP packets are not message boundaries.
+**F3.** Retain incoming bytes until 0x0A. For each complete line, enforce the limit, decode strict UTF-8, and parse one complete JSON object. Keep any unfinished suffix. Drain all complete lines in order. Reads and TCP packets are not message boundaries.
 
-**F4.** A line of exactly 4,096 bytes followed by LF is valid-sized. More than 4,096 bytes before LF is fatal, even if no delimiter has yet arrived. EOF discards an incomplete suffix; it never executes as a message.
+**F4.** A line of exactly 4,096 bytes followed by 0x0A is valid-sized. More than 4,096 bytes before 0x0A is fatal, even if no delimiter has yet arrived. EOF discards an incomplete suffix; it never executes as a message.
 
-**F5.** Reject invalid UTF-8, invalid JSON, duplicate object keys, non-object roots, NaN/Infinity, raw embedded LF, and CR bytes in a frame. Escaped string content such as backslash-n is allowed and is not a delimiter. Object key order has no significance.
+**F5.** Reject invalid UTF-8, invalid JSON, duplicate object keys, non-object roots, NaN/Infinity, raw embedded 0x0A, and CR bytes in a frame. Escaped string content such as backslash-n is allowed and is not a delimiter. Object key order has no significance.
 
 **F6.** Oversize or malformed framing: send ERROR when a writable connection permits, then close the connection. For an assigned player this is a detected interruption, not an intentional forfeit. Well-framed schema/action errors keep the connection open and do not change game state.
 
-References: [JSON, RFC 8259](https://www.rfc-editor.org/rfc/rfc8259); [TCP, RFC 9293](https://www.rfc-editor.org/rfc/rfc9293). The LF delimiter and size limit are this application's rules, not TCP or JSON requirements. Newline framing is a form of delimiter-based text framing.
+References: [JSON, RFC 8259](https://www.rfc-editor.org/rfc/rfc8259); [TCP, RFC 9293](https://www.rfc-editor.org/rfc/rfc9293). The Newline delimiter and size limit are this application's rules, not TCP or JSON requirements.
 
 ## 4. Common fields and data types
 
@@ -258,7 +243,7 @@ Recovery policy:
 4. A second connection loss receives its own deadline. Invalid resume attempts do not extend a deadline. Repeated valid interruptions get a new grace window; imposing an anti-stalling budget is outside v1.
 5. If an active player's deadline expires while the opponent is online, declare RECONNECT_TIMEOUT and award the opponent the win. If the opponent is also disconnected, declare MATCH_ABORTED. Terminal outcomes are frozen.
 6. Lobby interruption reserves the seat for the same grace window. Expiry releases it without a win/loss. Both seats must be connected before starting.
-7. Intentional DISCONNECT bypasses grace. If the opponent is disconnected, still record them as the winner and retain that result for possible resume.
+7. Intentional DISCONNECT bypasses grace. If the opponent is disconnected through no fault of their own, still record them as the loser and retain that result for possible resume.
 8. Retain terminal state and both tokens for 30 seconds from terminal resolution, independently of expired gameplay grace. Permit result-only recovery for any non-ONLINE retained seat, including LEFT; send results on valid reconnect during retention, then notify writable peers with DISCONNECT/MATCH_CLOSED, close connections, invalidate tokens and clean up.
 
 A server process crash and recovery from disk are outside v1. Grace begins at detection, not at the unknowable instant the physical connection failed. A matching-response heartbeat timeout is now another loss detector; section 6.7 specifies it. The ten-second heartbeat deadline is not the reconnection grace period.
@@ -370,7 +355,7 @@ API references: [Python socket HOWTO](https://docs.python.org/3/howto/sockets.ht
 
 Probes and automatic responses continue during lobby waiting, turn deliberation, and PAUSED while that particular connection remains online. They may continue during terminal retention until closing. Stop scheduling for closing/retired connections; clear all pending/timer state on retirement, quit, or a new connection generation. Reconnection starts a fresh schedule/counter, with no carried-over deadline or response.
 
-**H3 — Ten-second deadline.** Record the expected probe before queueing its frame. Once the complete LF-terminated PING has been submitted successfully to the local socket, arm one deadline at monotonic completion time plus ten seconds. This local completion is not proof of peer delivery. Do not restart the deadline on partial progress, unrelated traffic, duplicates, mismatched PONG, or any new timer tick.
+**H3 — Ten-second deadline.** Record the expected probe before queueing its frame. Once the complete 0x0A-terminated PING has been submitted successfully to the local socket, arm one deadline at monotonic completion time plus ten seconds. This local completion is not proof of peer delivery. Do not restart the deadline on partial progress, unrelated traffic, duplicates, mismatched PONG, or any new timer tick.
 
 A matching PONG can be processed after transmission has started even if the local write-completion callback has not yet run; if it already completed that probe, the callback must not later arm a stale deadline. If the PING cannot be transmitted, handle the failed write/budget through R3–R5 instead of pretending a response was awaited. PONG writes use the same bounded output rules.
 
@@ -402,7 +387,7 @@ With a five-second interval and prompt local scheduling/output, an idle silent f
 
 ## 7. Wire examples
 
-Each line below depicts one entire frame. The final two displayed characters backslash-n stand for one actual LF byte, not two literal bytes. Tokens/IDs are illustrative, not credentials. Examples are independent unless stated otherwise. The PING/PONG pair requires an already bound/WELCOME session and is not sent before CONNECT.
+Each line below depicts one entire frame. The final two displayed characters backslash-n stand for one actual 0x0A byte, not two literal bytes. Tokens/IDs are illustrative, not credentials. Examples are independent unless stated otherwise. The PING/PONG pair requires an already bound/WELCOME session and is not sent before CONNECT.
 
 ```text
 {"version":1,"msg_type":"PING","payload":{"probe_id":17}}\n
@@ -429,7 +414,7 @@ Each line below depicts one entire frame. The final two displayed characters bac
 {"version":1,"msg_type":"GAME_OVER","payload":{"match_id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","state_revision":8,"winner_id":"P2","loser_id":"P1","reason":"RECONNECT_TIMEOUT"}}\n
 ```
 
-The LOAD and END_TURN examples are alternatives, not two requests to execute in succession. The final two examples show result recovery: a revision-9 snapshot accompanies the already frozen revision-8 outcome. These are separate from the earlier forfeit example. Byte example: the CONNECT frame ends with hexadecimal 7D 7D 0A (two closing braces, then LF).
+The LOAD and END_TURN examples are alternatives, not two requests to execute in succession. The final two examples show result recovery: a revision-9 snapshot accompanies the already frozen revision-8 outcome. These are separate from the earlier forfeit example. Byte example: the CONNECT frame ends with hexadecimal 7D 7D 0A (two closing braces, then 0x0A).
 
 
 ### 7.1 Connected-session revision trace

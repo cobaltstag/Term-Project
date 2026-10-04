@@ -32,7 +32,6 @@ Inventory and reward cycle are per player, not per global turn. There is no surv
 
 The main diagram shows gameplay. Transport loss overlays any active phase with PAUSED; section 5 defines exact restoration and expiry.
 
-```mermaid
 stateDiagram-v2
     direction TB
     [*] --> WAITING_FOR_PLAYERS
@@ -57,7 +56,6 @@ stateDiagram-v2
     PAUSED --> GAME_OVER: Grace expires / forfeit or abort
     GAME_OVER --> CLEANUP: Result retention expires
     CLEANUP --> WAITING_FOR_PLAYERS: Fresh lobby and tokens
-```
 
 An intentional DISCONNECT reaches GAME_OVER from every active phase, including PAUSED; it is omitted from individual arrows to keep the diagram readable. Recoverable protocol errors do not advance gameplay; fatal errors retire the connection and can enter PAUSED through transport-loss handling. Successful PING/PONG exchanges are connection-control operations available in all bound non-closing phases; they do not transition gameplay.
 

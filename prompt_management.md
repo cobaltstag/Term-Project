@@ -7,11 +7,9 @@
 
 Use the [protocol blueprint](protocol_blueprint.md) together with the [FSM specification](fsm_specification.md). The [SOW](CS457_AndrewBarton_TermProjectSOW.md) provides course context. Resolve conflicts explicitly rather than choosing an interpretation silently.
 
-**Current-stage boundary:** This work produces specifications, not socket boilerplate or the finished program. This restriction applies to the current design task. A later request for the finished program must explicitly authorize implementing its socket transport; the reusable prompt below includes that authorization.
-
 ## 1. Freeze the approved inputs
 
-D1–D10 are resolved in the protocol decision register. If later revisions introduce new proposals, resolve and record them before requesting implementation. Before the future coding request, select the implementation language, concurrency approach, and permitted dependencies as planned for the later sprints. Bracketed prompt inputs are intentional template fields, not missing wire-protocol definitions.
+If later revisions introduce new proposals, resolve and record them in a protocol decision register before requesting implementation. Before the future coding request, select the implementation language, concurrency approach, and permitted dependencies as planned for the later sprints. Bracketed prompt inputs are intentional template fields, not missing wire-protocol definitions.
 
 Identify the full Git commit SHA containing both approved specifications. A branch name or "latest version" alone is insufficient because its contents can change. The future agent must verify that it read the two files at that commit. The pinned specifications define observable protocol/game behavior. Later user-approved changes require an explicit specification revision and a new identified baseline; implementation convenience is not authorization to revise them.
 
@@ -43,7 +41,7 @@ This instruction makes adherence reviewable; it does not guarantee generated cod
 
 Use scenario expectations in the FSM (S1–S23), transport cases (C1–C18), and heartbeat cases (HSC1–HSC12) as the behavioral reference. A test must not obtain its expected result by calling the same rule implementation it is supposed to check.
 
-For example, S5 specifies rewards 1, 2, 4, 5, 1 and inventory totals 1, 3, 7, 12, 13 without spending. Assert those documented values rather than deriving the expected cycle through the production reward function. H4 requires an exact matching PONG: a mismatched response must leave the original deadline active.
+For example, S5 specifies rewards 1, 2, 4, 5, 1 and inventory totals 1, 3, 7, 12, 13 without spending. Assert those documented values rather than deriving the expected cycle through the production reward function. H4 requires an exact matching PONG or a valid message from the client: a mismatched response must leave the original deadline active.
 
 Provide controlled random outcomes and a controllable monotonic clock within the test environment. This enables repeatable loaded/empty chamber samples and checks immediately before, at, and after deadlines without relying on random luck or long real-time sleeps. Use those controls to exercise behavior, not merely to mirror implementation structure.
 
