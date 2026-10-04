@@ -2,12 +2,12 @@
 
 **Project:** CS 457 Term-Project  
 **Author:** Andrew Barton (design decisions developed with ChatGPT)  
-**Updated:** 2026-10-02  
+**Updated:** 2026-10-04  
 **Status:** Submission candidate; design decisions resolved; implementation verification remains future work.
 
 ## 1. Scope and decision status
 
-The confirmed design uses two players, server-controlled state, independent random chamber sampling, the forced-shot dare sequence, banked inventory, and the private repeating survival reward cycle. Intentional departure forfeits; interrupted connections permit reconnection. UTF-8 JSON with newline framing is selected. Application-level, bidirectional PING/PONG heartbeats with a ten-second matching-response deadline are now selected; this deadline verifies connection responsiveness and never limits how long a player may think.
+The confirmed design uses two players, server-controlled state, independent random chamber sampling, the forced-shot dare sequence, banked inventory, and the private repeating survival reward cycle. Intentional departure forfeits; interrupted connections permit reconnection. UTF-8 JSON with newline framing is selected. Application-level, bidirectional PING/PONG heartbeats use a ten-second deadline. A matching PONG or qualifying incoming gameplay progress (H4) completes the receiver's outstanding probe. This deadline verifies connection responsiveness and never limits how long a player may think.
 
 Multiplayer expansion, UI tutorials, persistent scores, server-crash recovery, and program implementation are outside this document. Language and concurrency-library selection belong to later SOW sprints.
 
@@ -27,7 +27,7 @@ Use TCP at the lab DNS name `server.barton.edu`, default port `45700`. The serve
 
 **A5.** Bind player identity to the server's current connection/session. MOVE has no client-controlled player_id. A resumed session replaces its old connection; old connections are fenced from further mutations.
 
-## 3. Serialization and framing - Newline Delimited
+## 3. Serialization and framing — newline-delimited JSON
 
 **F1.** TCP carries UTF-8 JSON objects. Exactly one object occupies each line. Append exactly one LF byte (0x0A) after the closing object; do not send CRLF, a BOM, blank lines, pretty-printed multiline JSON, or trailing whitespace.
 
@@ -41,7 +41,7 @@ Use TCP at the lab DNS name `server.barton.edu`, default port `45700`. The serve
 
 **F6.** Oversize or malformed framing: send ERROR when a writable connection permits, then close the connection. For an assigned player this is a detected interruption, not an intentional forfeit. Well-framed schema/action errors keep the connection open and do not change game state.
 
-References: [JSON, RFC 8259](https://www.rfc-editor.org/rfc/rfc8259); [TCP, RFC 9293](https://www.rfc-editor.org/rfc/rfc9293). The Newline delimiter and size limit are this application's rules, not TCP or JSON requirements.
+References: [JSON, RFC 8259](https://www.rfc-editor.org/rfc/rfc8259); [TCP, RFC 9293](https://www.rfc-editor.org/rfc/rfc9293). The LF newline delimiter and size limit are this application's rules, not TCP or JSON requirements.
 
 ## 4. Common fields and data types
 
@@ -102,7 +102,7 @@ A well-framed duplicate PING can be answered again; it does not complete the rec
 |---|---|---|
 | probe_id | Integer | Positive; must echo the specific peer PING being answered. |
 
-A PONG completes a local pending probe only when msg_type is PONG, the identifier matches that probe, the connection generation matches, and it is validated strictly before the armed response deadline (or satisfies the early-response case in H3). A valid incoming PING, MOVE, STATE_UPDATE, or other traffic never substitutes for the matching response.
+A PONG completes a local pending probe only when msg_type is PONG, the identifier matches that probe, the connection generation matches, and it is validated strictly before the armed response deadline (or satisfies the early-response case in H3). Separately, qualifying incoming gameplay progress can complete that same pending probe under H4. This does not turn a MOVE into a PONG or relax PONG identifier matching.
 
 Well-framed PONG with no pending probe, a different identifier, or an already completed/expired identifier is ignored without a gameplay mutation, ERROR-response loop, or deadline extension. Malformed fields remain schema errors. Do not apply MOVE's active-player, revision, or phase checks to heartbeat messages. Before WELCOME, clients do not send heartbeat messages.
 
@@ -241,12 +241,12 @@ Recovery policy:
 2. Pause active gameplay and save the exact prior phase, active player, turn, revision, inventory, cylinder and dare obligations. Notify the remaining connected player by STATE_UPDATE. Do not reveal private saved state.
 3. For an ongoing match/lobby, accept RECONNECT strictly before that player's grace deadline; at equality timeout wins. Once the match is terminal, use the result-retention deadline instead. Valid resume rebinds the session and sends its snapshot. Resume gameplay only when both players are online. Send each connected player a fresh recipient-specific STATE_UPDATE whenever session status changes, including the remaining peer when gameplay resumes.
 4. A second connection loss receives its own deadline. Invalid resume attempts do not extend a deadline. Repeated valid interruptions get a new grace window; imposing an anti-stalling budget is outside v1.
-5. If an active player's deadline expires while the opponent is online, declare RECONNECT_TIMEOUT and award the opponent the win. If the opponent is also disconnected, declare MATCH_ABORTED. Terminal outcomes are frozen.
+5. During an active/paused match, expiry of either disconnected player's deadline resolves the match regardless of whose turn it was. If the opponent is online, declare RECONNECT_TIMEOUT and award that opponent the win. If the opponent is also disconnected, declare MATCH_ABORTED. Terminal outcomes are frozen.
 6. Lobby interruption reserves the seat for the same grace window. Expiry releases it without a win/loss. Both seats must be connected before starting.
-7. Intentional DISCONNECT bypasses grace. If the opponent is disconnected through no fault of their own, still record them as the loser and retain that result for possible resume.
+7. Intentional DISCONNECT bypasses grace. The sender loses and the opponent wins, even if that opponent is disconnected; retain the result for the opponent's possible resume.
 8. Retain terminal state and both tokens for 30 seconds from terminal resolution, independently of expired gameplay grace. Permit result-only recovery for any non-ONLINE retained seat, including LEFT; send results on valid reconnect during retention, then notify writable peers with DISCONNECT/MATCH_CLOSED, close connections, invalidate tokens and clean up.
 
-A server process crash and recovery from disk are outside v1. Grace begins at detection, not at the unknowable instant the physical connection failed. A matching-response heartbeat timeout is now another loss detector; section 6.7 specifies it. The ten-second heartbeat deadline is not the reconnection grace period.
+A server process crash and recovery from disk are outside v1. Grace begins at detection, not at the unknowable instant the physical connection failed. A heartbeat timeout without matching PONG or qualifying gameplay progress is another loss detector; section 6.7 specifies it. The ten-second heartbeat deadline is not the reconnection grace period.
 
 
 ### 6.1 Transport event classification
@@ -266,14 +266,26 @@ Python API names below illustrate the behavior for a likely Python implementatio
 | EINTR / InterruptedError from an interrupted low-level I/O operation, without application cancellation | Interrupted operation | Retry only that I/O operation with known remaining bytes and preserved state, not the MOVE. Python often retries automatically. An API failure with unknown partial-send progress follows R3 instead. |
 | Explicitly configured receive polling timeout expires | No data within one polling interval | Check timers and continue waiting. No automatic forfeit, EOF inference, or connection-loss declaration. No inactivity/game-turn deadline is specified in v1. |
 | OS-reported connection timeout, established write timeout, or write-completion deadline expires | Failed transport/output operation | Invoke R5. A receive polling timeout must be distinguishable from this by operation and error context; do not classify every TimeoutError identically. |
-| Ten-second deadline expires without the specific matching PONG | Heartbeat-detected unresponsive connection | Invoke R5 exactly once; apply interruption/grace, never immediate forfeit. |
+| Ten-second deadline expires without matching PONG or qualifying incoming gameplay progress (H4) | Heartbeat-detected unresponsive connection | Invoke R5 exactly once; apply interruption/grace, never immediate forfeit. |
 | Other OSError from established-session read/write, after recoverable conditions above have been excluded | Unclassified socket failure | Log operation and numeric error; detach safely using R5. Never silently continue on a potentially unusable socket. |
 | EOF/error/timeout before a CONNECT or RECONNECT has successfully bound the new connection | Unbound connection failure | Close that connection only. Do not invent a player, alter a reserved existing session, or start a new grace period. |
-| Later EOF/error after processed DISCONNECT, server closure, terminal resolution, or detachment | Duplicate/expected closure event | Retire transport resources without another gameplay outcome or grace-period reset. |
+| Later EOF/error after processed DISCONNECT, server closure, terminal resolution, or detachment | Duplicate/expected closure event | No second outcome or grace reset. During orderly closure, EOF ends only receiving; finish bounded final output under R9 before close when possible. Terminal loss still updates connection status under R5. |
 
 Short receives with positive byte counts are ordinary data, not EOF. A readiness notification alone is not EOF; the actual receive result determines it. An accept/connect failure affects the listener or new connection, not an existing player's game. Nonblocking connect-in-progress is not a successful binding or a player loss.
 
 ### 6.2 Receive ordering and incomplete data
+
+Every accepted socket has a receive handler, including while waiting for CONNECT or RECONNECT. After a positive-size receive, explicitly test `if not data: break` (or the event-loop equivalent: unregister this socket and return). That exit must invoke the appropriate one-time R5/R6 cleanup; it must not merely leave a registered EOF socket ready to spin. It exits only this connection's receive loop, never the server's listener/accept loop. An empty application buffer while waiting for more bytes is not EOF, and would-block/timeout exceptions are not empty receives.
+
+**Extraction contract for back-to-back messages:**
+
+1. Append each nonempty receive to that connection's byte buffer. Do not decode individual chunks: UTF-8 characters can cross reads.
+2. While an LF is present, take only the bytes before the first LF as one frame, remove that frame plus its LF, enforce its byte limit, decode, validate, and dispatch it.
+3. Dispatch in stream order and finish each atomic transition before validating the next frame against the resulting state. Recheck closing status and applicable deadlines between frames; preserve order if yielding to other connections/timers.
+4. Repeat for all complete frames. Retain only the incomplete suffix for the next read, enforcing its 4,096-byte ceiling even without LF. A receive containing several legal frames may exceed 4,096 total bytes; the ceiling applies separately to each frame.
+5. Stop dispatching at a processed DISCONNECT or fatal protocol failure. Discard trailing application frames on that closing connection. Closing-only reads may drain/discard transport bytes under R9; they cannot execute commands.
+
+For example, one read may contain a complete MOVE line, a complete PONG line, and half the next JSON object. Dispatch MOVE then PONG, retain the suffix, and complete it on the next read. If the MOVE qualifies under H4, its late PONG is now ignored. Conversely, PONG followed by MOVE completes the probe first, then processes the action. A second back-to-back MOVE still needs a current revision, turn, and legal phase; batching never bypasses validation. Writers queue complete LF-terminated frames through one serialized stream, so `frame1 + frame2` needs no extra separator and frame bytes never interleave.
 
 **R2.** Complete frames already obtained from the stream must be validated and processed in stream order before that stream's EOF event is resolved, while the connection remains eligible to accept input. Stop at a processed DISCONNECT or fatal framing error and ignore all subsequent bytes from that closing connection. Do not attempt to drain an unread/reset socket after declaring a fatal error.
 
@@ -287,9 +299,9 @@ For a partially written frame, retain known offsets only while the same live con
 
 If a send-all API raises, the delivered byte count can be unknown. Do not restart the same frame from byte zero on that stream or automatically replay its associated action. Retire the failed connection and recover by snapshot. An ERROR or DISCONNECT acknowledgement whose send fails is best-effort; its failure never changes a previously committed forfeit or terminal result.
 
-**R4 — Bounded output (D9).** Each outgoing frame has a five-second monotonic output budget beginning when it is queued for transmission, including queue residence and writes; partial progress does not restart it. This prevents a queued heartbeat from waiting indefinitely before its response timer can begin. A transient would-block observation before this deadline is recoverable. Deadline expiry classifies the connection as failed output. A server-requested close also has a five-second total flush budget beginning when closure is decided; queue final control/result frames in order, then close when output completes, a fatal write occurs, or that budget expires. Use the earlier applicable deadline. Do not wait indefinitely for a peer acknowledgement or FIN. No blocking network I/O or flush may hold the authoritative-state lock or prevent the server processing another session's events/timers.
+**R4 — Bounded output.** Each outgoing frame has a five-second monotonic output budget beginning when it is queued for transmission, including queue residence and writes; partial progress does not restart it. This prevents a queued heartbeat from waiting indefinitely before its response timer can begin. A transient would-block observation before this deadline is recoverable. Deadline expiry classifies the connection as failed output. A server-requested close also has a five-second total flush budget beginning when closure is decided; queue final control/result frames in order, then shut down writes when output completes and drain to EOF within the remaining budget as R9 specifies. Close on drained EOF, a fatal I/O error, or budget expiry. Use the earlier applicable deadline. Do not wait indefinitely for a peer acknowledgement or FIN. No blocking network I/O or flush may hold the authoritative-state lock or prevent the server processing another session's events/timers.
 
-This budget bounds output attempts; heartbeat probes provide traffic and a separate matching-response deadline to detect quiet unresponsive connections. It is distinct from reconnection grace, receive polling, and terminal-result retention.
+This budget bounds output attempts; heartbeat probes provide traffic and a separate heartbeat-completion deadline to detect quiet unresponsive connections. It is distinct from reconnection grace, receive polling, and terminal-result retention.
 
 ### 6.4 One-time connection retirement and cleanup
 
@@ -311,7 +323,7 @@ Expected already-disconnected/already-closed errors during shutdown/close are cl
 
 **R7.** A client that detects unexpected EOF/fatal established-socket error without a received terminal/closure notification stops sending gameplay, discards that connection's partial buffers, and retains its last credential for a reconnect attempt. It cannot declare itself or the opponent the winner locally. After RECONNECT, wait for WELCOME and STATE_UPDATE before issuing a new MOVE; never automatically resend a potentially accepted action.
 
-A player choosing to quit sends the complete DISCONNECT frame, disables further actions and automatic reconnection, and attempts to receive the final result/acknowledgement. Client quit-wait budget is five seconds from the quit request; close on acknowledgement, EOF/error, or expiry. If the server never processes the complete request, the server follows EOF/failure policy; the client's intention or successful local send cannot substitute for receipt.
+A player choosing to quit, or a controlled normal exit from a bound session, uses the same quit path: disable further actions, probes, and automatic reconnection; queue and flush a complete DISCONNECT; then call sock.shutdown(socket.SHUT_WR) to initiate TCP send-side closure while continuing to receive the final result/acknowledgement and EOF. Call sock.close() after EOF/error or the five-second total quit budget, measured from the quit request. An acknowledgement resolves application intent but does not restart that budget; drain to EOF within the remaining time. If flushing fails or the budget expires first, close immediately through best-effort cleanup. Do not rely on garbage collection or interpreter exit to send DISCONNECT. If the server never processes the complete request, the server follows EOF/failure policy; the client's intention or successful local send cannot substitute for receipt.
 
 Received DISCONNECT/CLIENT_REQUEST or MATCH_CLOSED stops reconnection. Received GAME_OVER fixes the displayed result; subsequent closure does not imply an additional loss. Client retry and handshake deadlines are specified by R8 below. No turn-inactivity deadline is imposed: a responsive player can take time to think. Heartbeat scheduling and response processing are specified in section 6.7.
 
@@ -320,6 +332,36 @@ Received DISCONNECT/CLIENT_REQUEST or MATCH_CLOSED stops reconnection. Received 
 After unexpected loss with known credentials, the client starts a local 30-second recovery-attempt window, tries RECONNECT immediately, and retries failed transport attempts or RESUME_BUSY one second after that attempt ends. Only one attempt may be in flight. Stop on successful WELCOME plus snapshot, RESUME_DENIED, deliberate quit, a terminal/closure notification, or local window expiry. Never resend an old MOVE. No failure/retry extends the server's grace. A busy response can occur because client and server detect failure at different times; heartbeat expiry will eventually retire an unresponsive old connection.
 
 The local client window begins at its own detection time and does not claim to equal the server's independently timed grace. A failed automatic recovery is reported as unavailable/unknown until the server returns a result; the client must not invent a winner. If WELCOME was never received on the initial connection, no credential is available: report the failed join and allow an explicit fresh join later; do not guess a token or automatically occupy another seat. A retained valid credential can be used in a later explicit result-recovery request while the server's terminal-retention window remains open.
+
+### 6.5.1 Orderly shutdown and TCP observation
+
+**R9 — Explicit close lifecycle.** FIN and ACK are TCP control flags generated/processed by the OS, not JSON message types and not values returned by recv(). A normal FIN close terminates the two directions independently; the usual FIN, ACK, FIN, ACK exchange can combine acknowledgements into fewer packets. The application observes EOF after preceding stream bytes have been consumed. A direct close or process exit does not prove graceful application departure or guarantee a four-packet trace, especially on failure or with unread data. See [RFC 9293 section 3.6](https://www.rfc-editor.org/rfc/rfc9293.html#section-3.6) and the [Python socket API](https://docs.python.org/3/library/socket.html#socket.socket.shutdown).
+
+The following is the expected successful client-initiated quit sequence, not additional wire message schemas:
+
+| Step | Client application / TCP | Server application / TCP |
+|---|---|---|
+| 1 | Controlled quit/normal exit enters R7; flushes DISCONNECT plus LF within the existing budget. | Receives bytes and dispatches the complete DISCONNECT in stream order. Commits forfeit/seat release or unchanged terminal result; marks connection closing. |
+| 2 | Calls sock.shutdown(socket.SHUT_WR) after the final application frame is fully submitted. Client TCP sends FIN after earlier bytes. | Server TCP acknowledges FIN. After draining preceding bytes, a positive-size recv() returns b''; the handler exits receiving. Already processed DISCONNECT means no new grace. |
+| 3 | Keeps its receive half open for terminal snapshot/result and DISCONNECT acknowledgement. | Flushes applicable final frames under R4; then calls sock.shutdown(socket.SHUT_WR). Server TCP sends its FIN. |
+| 4 | Client TCP acknowledges server FIN. Client receives remaining application frames then EOF and calls sock.close(). | Once output is finished and inbound EOF observed, calls sock.close(); otherwise drains/discards remaining input until EOF or the existing close budget ends. |
+
+The streams are independent: the server may finish its response/send-side shutdown before its application observes client EOF. The outcome does not depend on that ordering. R6 forbids further command dispatch once closing, but permits bounded transport draining solely for orderly cleanup. A valid DISCONNECT followed by EOF still receives final output when possible; EOF must not prematurely discard that closing socket's output queue. Both sides use the earlier applicable output/quit/close deadline and explicitly close on expiry or error; no wait for FIN or TIME_WAIT may block other players or timers. Shutdown errors are logged and cannot prevent close.
+
+Server-initiated MATCH_CLOSED uses the same bounded sequence: flush notification, shutdown the sending direction, drain to EOF within R4, then close. On receipt, the client stops gameplay/reconnection, stops writes, shuts down its sending direction, and drains/closes within five seconds of notification (or an earlier already-running quit budget). An active client that calls only sock.close() or exits without a processed DISCONNECT produces EOF/reset interruption policy at the server; FIN alone cannot establish intent.
+
+### 6.5.2 Exception boundaries and grace timer
+
+**R10 — Classify at the socket boundary.** Receive and serialized-send handlers catch socket exceptions around the I/O operation, with its connection generation and operation recorded. Handle specific recoverable/fatal cases in R1 before a fallback OSError handler. Do not wrap gameplay dispatch in a blanket exception handler that mistakes a coding error for a peer disconnect.
+
+- **ConnectionResetError:** the connection was reset. Stop using it and invoke R5 once; do not wait for a heartbeat.
+- **BrokenPipeError:** writing failed on a closed or locally write-shut-down stream. On an otherwise live connection invoke R5 once. On an already closing/retired connection perform cleanup only; a write attempted after local shutdown also merits a local diagnostic, not a claim that the opponent quit.
+- **TimeoutError / socket.timeout:** classify by operation and configured timer. Receive polling expiry only wakes the loop to check timers. An established write timeout or OS connection timeout is loss; a connect/handshake timeout closes only that unbound attempt. These are not interchangeable with gameplay grace expiry.
+- Other exceptions follow R1/R6; ensure cleanup runs even if the handler exits by an exception. Do not send an ERROR over a socket already classified as failed.
+
+A server-side failure of P1's current socket makes P1 absent and informs P2 through the authoritative snapshot. A client-side failure concerns that client's connection to the server; it cannot diagnose the other player's connection or declare their loss.
+
+**Grace is retained-session state, not a 30-second recv() on the failed socket.** R5 closes that socket immediately and records `grace_deadline = loss_detected_at + 30 seconds` using monotonic time. The server's independent timer scheduler checks deadlines even with no incoming network traffic. At expiry it serializes a grace-expired event, rechecks session generation/status/deadline, then applies lobby release or FSM T11/T12. Successful resume invalidates the old timer; duplicate/stale timer callbacks do nothing. Do not require or manufacture a generic socket TimeoutError to trigger this transition. Terminal state/token cleanup follows the separate 30-second result retention; it is not immediate erasure at gameplay grace expiry.
 
 ### 6.6 Transport conformance scenarios
 
@@ -343,46 +385,71 @@ The local client window begins at its own detection time and does not claim to e
 | C16 | Gameplay grace expires, then absent player reconnects during terminal retention | WELCOME, terminal snapshot, GAME_OVER; result only, no restarted game. |
 | C17 | Unbound client never completes handshake, or bound client never receives initial synchronization | Five-second handshake/sync timeout; no invented seat/result or automatic MOVE replay. |
 | C18 | Outgoing frame remains queued without a first write attempt | Five-second budget still expires; no indefinitely queued probe. |
+| C19 | Controlled client exit flushes DISCONNECT, shuts down writes, and drains EOF | Server commits intent before EOF; final output is attempted; both sockets explicitly close within their budgets. |
+| C20 | EOF while waiting for CONNECT/RECONNECT, then a new client arrives | Per-connection receive loop exits once; accept loop stays available; existing reservations are unchanged. |
+| C21 | Several valid frames total more than 4,096 bytes in one read, followed by a partial frame | Enforce limits per frame; dispatch complete frames in order, retain suffix, and revalidate each against current state. |
+| C22 | No traffic for 30 seconds after a detected loss, or stale grace callback after resume | Independent scheduler expires the absent session; a stale callback cannot end the resumed match. |
+| C23 | BrokenPipeError after local orderly shutdown vs on a live stream | Closing case only cleans up/logs; live case retires once; neither proves intentional opponent departure. |
 
 API references: [Python socket HOWTO](https://docs.python.org/3/howto/sockets.html), [socket API including partial sends and sendall failure](https://docs.python.org/3/library/socket.html), and [OS exception classifications](https://docs.python.org/3/library/exceptions.html). EOF and exception semantics come from the socket API; half-close rejection, timeout classification, output budgets, and game consequences are application design decisions.
 
 
 ### 6.7 Heartbeat scheduling, correlation, and expiry
 
-**H1 — Connection control, not game state.** Both endpoints send PING and answer PING with PONG in the background. Heartbeats are bound to the existing session/connection; they contain only probe_id. Successful exchanges do not change phase, inventory, turn_id, reward position, or state_revision. Expiry changes connection status through R5 and may therefore pause the match and advance its revision.
+**H1 — Connection control, not game state.** Both endpoints send PING and answer PING with PONG in the background. Heartbeats are bound to the existing session/connection; they contain only probe_id. Completing a probe does not itself change phase, inventory, turn_id, reward position, or state_revision. A qualifying gameplay message still has its normal gameplay effects. Expiry changes connection status through R5 and may pause the match and advance its revision.
 
-**H2 — Scheduling (D10).** maintain five-second monotonic scheduling ticks per bound connection. Start the server's schedule after successful CONNECT/RECONNECT binding; start the client's after WELCOME. The first probe opportunity is five seconds later. At a tick, create/send a probe only if that endpoint has no queued or awaiting-response probe. Otherwise skip the tick: do not overlap probes or resend a pending PING. After completion, the next regular tick can create a new identifier. Each direction has its own counter and pending record; identically numbered probes in opposite directions are distinct.
+**H2 — Scheduling.** Maintain five-second monotonic scheduling ticks per bound connection. Start the server's schedule after successful CONNECT/RECONNECT binding; start the client's after WELCOME. The first probe opportunity is five seconds later. At a tick, create/send a probe only if that endpoint has no queued, partially transmitting, or awaiting-response probe. Otherwise skip the tick: do not overlap probes or resend a pending PING. After completion, the next regular tick can create a new identifier. Each direction has its own counter and pending record; identically numbered probes in opposite directions are distinct. Gameplay completion does not restart the tick schedule.
 
 Probes and automatic responses continue during lobby waiting, turn deliberation, and PAUSED while that particular connection remains online. They may continue during terminal retention until closing. Stop scheduling for closing/retired connections; clear all pending/timer state on retirement, quit, or a new connection generation. Reconnection starts a fresh schedule/counter, with no carried-over deadline or response.
 
-**H3 — Ten-second deadline.** Record the expected probe before queueing its frame. Once the complete 0x0A-terminated PING has been submitted successfully to the local socket, arm one deadline at monotonic completion time plus ten seconds. This local completion is not proof of peer delivery. Do not restart the deadline on partial progress, unrelated traffic, duplicates, mismatched PONG, or any new timer tick.
+**H3 — Ten-second deadline.** Register the expected probe before queueing its frame, including the current connection generation and the client's latest applied snapshot revision when applicable. Once the complete LF-terminated PING has been submitted successfully to the local socket, arm one deadline at monotonic completion time plus ten seconds, unless H4 already completed that probe. This local completion is not proof of peer delivery. Partial progress, unrelated traffic, duplicates, mismatched PONG, and timer ticks do not restart the deadline.
 
-A matching PONG can be processed after transmission has started even if the local write-completion callback has not yet run; if it already completed that probe, the callback must not later arm a stale deadline. If the PING cannot be transmitted, handle the failed write/budget through R3–R5 instead of pretending a response was awaited. PONG writes use the same bounded output rules.
+A matching PONG may complete the probe after its transmission has started even if the local write-completion callback has not yet run. Qualifying gameplay progress may also complete a queued or transmitting probe under H4. A completed probe's later write callback must never arm a stale deadline. If a completed probe has not written any bytes, remove its queued PING. If any bytes have been submitted, finish that frame under its original output budget to preserve framing; do not splice it out or create another probe before transmission finishes. Failure still invokes R3–R5 even if liveness was already demonstrated. PONG writes use the same bounded output rules.
 
-**H4 — Exact pairing.** Validate the PONG envelope, integer identifier, current generation, and pending probe under serialized connection-control handling. When its deadline is armed, process a matching response strictly before it; equality is expired. Before the completion callback arms a deadline, use H3's early-response rule. Clear that pending record atomically on success. An incoming PING with the same numeric ID is still a request, never a response. Ignore well-framed stale/unmatched/unsolicited PONG; it cannot reset responsiveness timers.
+**H4 — Matching response or incoming gameplay progress.** Under serialized connection-control handling, a local outstanding probe succeeds through either route:
 
-**H5 — Expiry.** At or after a pending deadline, if no matching response completed it, retire the current connection once using R5 with diagnostic cause HEARTBEAT_TIMEOUT. This cause is internal, not a new GAME_OVER reason or ERROR code. The server marks the session disconnected, pauses if required, and begins the separate 30-second grace. A client stops gameplay and attempts session recovery using R7. Do not send a fatal ERROR down the timed-out stream or wait for further proof. A late PONG cannot revive the old connection or extend grace.
+| Route | Exact qualifying input |
+|---|---|
+| Matched heartbeat | Valid PONG with the pending probe_id, from the current connection generation, satisfying H3's transmission-start rule. |
+| Gameplay received by server | A complete MOVE from that same current session that passes every normal validation guard and is accepted. TRIGGER, PASS, LOAD, and END_TURN all qualify. Merely receiving bytes or parsing a schema-valid but rejected MOVE does not. |
+| Gameplay received by client | A valid STATE_UPDATE for its current match, accepted for application with revision newer than both the previous applied snapshot (compare before applying this one) and the revision recorded when the probe was registered, and event PASSED, SURVIVED, TURN_READY, or MATCH_ENDED. The first valid GAME_OVER for the current match also qualifies, including the frozen-result revision rule in section 5.1. Repeated results do not. |
 
-With a five-second interval and prompt local scheduling/output, an idle silent failure can be noticed roughly up to fifteen seconds later (up to five until the next probe plus ten awaiting its response). That is not a ten-second end-to-end reconnection/forfeit promise. Output budgets, scheduling delays, and the separate grace period affect total elapsed time. Expiry means the connection is no longer responsive enough under this policy; it does not prove the remote process has crashed.
+Process the qualifying input after the probe has been registered, on the same live connection generation, and strictly before any armed deadline; equality is expired. Check expiry before accepting a MOVE or applying a snapshot for this purpose. Before the write callback arms a deadline, H3 governs completion. Clear only the receiver's currently outstanding probe, atomically with its acceptance decision; no extra game revision is added for heartbeat completion. No outstanding probe means no heartbeat effect.
 
-**H6 — Background progress.** Socket receive/parsing, PONG responses, probe scheduling, and deadlines must continue while the console waits for keyboard input and while gameplay is paused. A blocking prompt must not hold the connection handler or game-state lock. All heartbeat/control frames share the existing TCP stream and framing limits; serialize writes so frame bytes cannot interleave. PING/PONG can be handled before the first gameplay snapshot after WELCOME, but MOVE remains prohibited until synchronization is complete. Threading vs multiplexing remains a later implementation decision.
+This is evidence of incoming application activity, not proof the peer read that PING. It deliberately relaxes the earlier PONG-only policy. Heartbeats do not wait for a particular player's choice and have no turn_id; the next qualifying incoming gameplay event can complete the current probe. A server receiving P1's MOVE completes its probe to P1 only, never its probe to P2. A client's own outgoing MOVE cannot complete its probe to the server; receiving an eligible server update/result can.
 
-**H7 — Application keepalive.** This protocol uses its own JSON heartbeat over TCP; it does not adopt WebSocket framing or require a WebSocket library. OS TCP keepalive may be supplementary but cannot replace H1–H6. Reference: [Ping/Pong timing rationale](https://websockets.readthedocs.io/en/stable/topics/keepalive.html).
+Malformed input, rejected/stale/out-of-turn MOVE, repeated/older snapshots, SNAPSHOT/CONNECTION_LOST/RESUMED notifications, ERROR, handshake traffic, and arbitrary bytes do not substitute for heartbeat completion. A valid DISCONNECT initiates closure under R6/R7 instead of renewing liveness.
+
+After completion by gameplay or PONG, ignore a well-framed late PONG for that completed identifier; do not send ERROR, extend a deadline, or let it complete a newer probe. An incoming PING remains the peer's independent request and must receive its matching PONG while the connection is live, even after gameplay or a local probe's completion. Never discard PING merely because a player acted. A mismatched PONG cannot be treated as gameplay progress.
+
+**H5 — Expiry.** At or after a pending deadline, if neither route completed it, retire the current connection once using R5 with diagnostic cause HEARTBEAT_TIMEOUT. This cause is internal, not a new GAME_OVER reason or ERROR code. The server marks the session disconnected, pauses if required, and begins the separate 30-second grace. A client stops gameplay and attempts session recovery using R7. Do not send a fatal ERROR down the timed-out stream or wait for further proof. Late PONG or gameplay cannot revive the retired connection or extend grace. Old timer callbacks must check both generation and pending probe_id before taking action.
+
+With a five-second interval and prompt local scheduling/output, an idle silent failure can be noticed roughly up to fifteen seconds later (up to five until the next probe plus ten awaiting completion). That is not a ten-second end-to-end reconnection/forfeit promise. Output budgets, scheduling delays, and the separate grace period affect total elapsed time. Expiry means the connection is no longer responsive enough under this policy; it does not prove the remote process has crashed.
+
+**H6 — Background progress and dispatch.** Socket receive/parsing, PONG responses, probe scheduling, and deadlines must continue while the console waits for keyboard input and while gameplay is paused. A blocking prompt must not hold the connection handler or game-state lock. All heartbeat/control frames share the existing TCP stream and framing limits; serialize writes so frame bytes cannot interleave. Dispatch complete frames in their received order through their type-specific handlers; do not reorder a batch to favor PONG or MOVE. H4 specifies the result of either order. PING/PONG may be handled before the first gameplay snapshot after WELCOME, but MOVE remains prohibited until synchronization is complete. Threading vs multiplexing remains a later implementation decision.
+
+**H7 — Application keepalive.** This protocol uses its own JSON heartbeat over TCP; it does not adopt WebSocket framing or require a WebSocket library. OS TCP keepalive may be supplementary but cannot replace H1–H6. Reference: [Ping/Pong timing rationale](https://websockets.readthedocs.io/en/stable/topics/keepalive.html). The gameplay-completion exception in H4 is this project's own policy.
 
 | ID | Heartbeat conformance scenario | Required outcome |
 |---|---|---|
 | HSC1 | Send PING id 17; receive valid PONG id 17 before deadline | Clear only that connection/direction's pending probe; gameplay/revision unchanged. |
 | HSC2 | Pending id 17; receive PONG id 16, duplicate old PONG, or unsolicited PONG | Ignore; no deadline extension or response loop. |
-| HSC3 | Pending id 17; receive PING id 17 from peer | Reply PONG id 17; own pending request still requires its own incoming PONG. |
-| HSC4 | Receive MOVE/STATE_UPDATE but no matching PONG | Heartbeat deadline still expires; arbitrary traffic cannot replace correlation. |
-| HSC5 | Matching PONG just before deadline vs exactly at deadline | Before succeeds; equality expires and follows R5. |
+| HSC3 | Pending id 17; receive PING id 17 from peer | Reply PONG id 17; own pending request remains pending until matching PONG or qualifying gameplay. |
+| HSC4 | Server accepts current-session MOVE, or client applies qualifying newer gameplay snapshot, before pending deadline | Complete that receiver's outstanding probe; preserve normal gameplay effects; no additional revision. |
+| HSC5 | Matching PONG or qualifying gameplay just before deadline vs exactly at deadline | Before succeeds; equality expires and follows R5; late gameplay is not accepted on the retired connection. |
 | HSC6 | Deadline expires during any running phase or while already PAUSED | One transport loss; preserve committed gameplay/context; begin only this player's grace. |
 | HSC7 | Client waits at console prompt longer than ten seconds | Background heartbeat continues; player thinking does not itself cause loss. |
 | HSC8 | Reconnect, then stale old-generation timeout/PONG callback occurs | New connection is unaffected; no deadline carried over. |
 | HSC9 | PING send fails or response to peer PING fails | Existing bounded-write/loss rules; no action replay or duplicate retirement. |
 | HSC10 | Peer GAME_OVER/intentional DISCONNECT already resolved when heartbeat expires | Preserve terminal result; do not manufacture another loss. |
-| HSC11 | Scheduling tick occurs with an outstanding probe | Skip creating a new probe; original deadline unchanged. |
-| HSC12 | Matching PONG processed before local send-completion callback | Callback must not arm a deadline for the completed probe. |
+| HSC11 | Scheduling tick occurs with queued, transmitting, or awaiting-response probe | Skip creating a new probe; original deadline unchanged. |
+| HSC12 | Matching PONG or qualifying gameplay processed before local send-completion callback | Callback must not arm a deadline for the completed probe; finish any partially transmitted frame. |
+| HSC13 | MOVE completes probe 17, probe 18 later starts, then PONG 17 arrives | Ignore PONG 17; probe 18 and its deadline remain unchanged. |
+| HSC14 | Qualifying gameplay completes local probe, then peer PING arrives | Still answer PING; the peer's independent probe is not canceled. |
+| HSC15 | Rejected/stale MOVE, repeated/old snapshot, ERROR, or outgoing MOVE while probe pending | No completion or deadline extension; expiry remains possible. |
+| HSC16 | Coalesced valid MOVE then matching PONG vs matching PONG then MOVE | Both process in stream order; one probe completion and one accepted gameplay action. |
+| HSC17 | Qualifying gameplay arrives while PING queued with zero bytes sent | Remove unsent PING and complete probe; no stale timer; next normal tick may issue next ID. |
+| HSC18 | P1's accepted MOVE arrives while server has pending probes to P1 and P2 | Only P1's probe completes; P2 still needs its own qualifying input. |
 
 
 ## 7. Wire examples
@@ -397,7 +464,7 @@ Each line below depicts one entire frame. The final two displayed characters bac
 {"version":1,"msg_type":"LOBBY_WAIT","payload":{"match_id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","connected_players":1,"required_players":2}}\n
 {"version":1,"msg_type":"GAME_START","payload":{"match_id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","first_player_id":"P1"}}\n
 {"version":1,"msg_type":"MOVE","turn_id":1,"state_revision":3,"payload":{"action":"PASS"}}\n
-{"version":1,"msg_type":"MOVE","turn_id":2,"state_revision":5,"payload":{"action":"TRIGGER"}}\n
+{"version":1,"msg_type":"MOVE","turn_id":2,"state_revision":4,"payload":{"action":"TRIGGER"}}\n
 {"version":1,"msg_type":"MOVE","turn_id":2,"state_revision":5,"payload":{"action":"LOAD","count":1}}\n
 {"version":1,"msg_type":"MOVE","turn_id":2,"state_revision":5,"payload":{"action":"END_TURN"}}\n
 {"version":1,"msg_type":"STATE_UPDATE","payload":{"match_id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","state_revision":5,"phase":"LOAD","resume_phase":null,"turn_id":2,"active_player_id":"P2","allowed_actions":["LOAD","END_TURN"],"self":{"player_id":"P2","inventory":1},"players":[{"player_id":"P1","connection":"ONLINE"},{"player_id":"P2","connection":"ONLINE"}],"event":"SURVIVED","reconnect_remaining_ms":null}}\n
@@ -432,7 +499,7 @@ This trace assumes both joins succeed without connection events, P1 starts, and 
 
 ## 8. Conformance and related documents
 
-Protocol behavior is checked by the message schemas, requirements A1–A5/F1–F6/R1–R8/H1–H7, transport cases C1–C18, heartbeat cases HSC1–HSC12, and FSM scenarios S1–S23 in [fsm_specification.md](fsm_specification.md). These are expected behaviors for future implementation verification, not claims of tests already executed.
+Protocol behavior is checked by the message schemas, requirements A1–A5/F1–F6/R1–R10/H1–H7, transport cases C1–C23, heartbeat cases HSC1–HSC18, and FSM scenarios S1–S23 in [fsm_specification.md](fsm_specification.md). These are expected behaviors for future implementation verification, not claims of tests already executed.
 
 Minimum coverage includes fragmented/coalesced frames; the 4,096/4,097 byte boundary; UTF-8 byte counting; missing/extra/wrong-type fields; invalid directions and states; forced-pass rejection; loading limits; stale revisions after a lost response; recovery during every phase; exact timeout boundaries; terminal-result immutability; and private-field exclusion.
 

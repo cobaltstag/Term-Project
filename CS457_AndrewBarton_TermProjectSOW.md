@@ -2,7 +2,7 @@
 
 **Student Name:** Andrew Barton  
 **Date:** 2026-09-16  
-**Last Updated:** 2026-10-02  
+**Last Updated:** 2026-10-04  
 **Course:** CS 457 - Computer Networks  
 **Target Server Domain:** `server.barton.edu`  
 
@@ -30,7 +30,7 @@
 5. **Loading:** After surviving, the player may load a positive number of banked bullets, up to both their inventory and the number of empty chambers, including filling the cylinder. Loaded bullets occupy randomly chosen distinct empty slots. There is no unloading action. Declining to load spends nothing. Version-one behavior: one accepted `LOAD` or `END_TURN` finishes the loading phase.
 6. **Pass/dare:** A normal-turn `PASS` transfers the turn and obligates the opponent to pull the trigger. If that opponent dies, the passer wins. If they survive, they earn their reward and may load or end their turn; the original passer must then pull the trigger. If the passer also survives, they earn their reward and may load or end their turn, after which the opponent has a normal turn. Neither forced turn permits another pass.
 7. **Hidden information:** Neither client receives cylinder contents, the loaded chamber count, the opponent's inventory, their loading quantity, or either next reward position. A full cylinder guarantees death for the next player who pulls the trigger. This does not identify in advance which player will be obliged to shoot. Outcomes and validation feedback may permit deductions.
-8. **Leaving:** An intentional `DISCONNECT` forfeits an active match. A detected connection interruption reserves the player's server state for a reconnection window; a successful reconnection immediately receives their authorized current state. The match pauses during a 30-second reconnection grace. Bidirectional paired heartbeats have a ten-second response deadline and five-second probe interval.
+8. **Leaving:** An intentional `DISCONNECT` forfeits an active match. A detected connection interruption reserves the player's server state for a reconnection window; a successful reconnection immediately receives their authorized current state. The match pauses during a 30-second reconnection grace. Bidirectional heartbeats have a ten-second response deadline and five-second scheduling interval. A matching PONG or qualifying incoming gameplay progress satisfies an outstanding probe; late PONGs are ignored, while peer PING requests still receive replies.
 - **Victory Condition:** The other player is eliminated or forfeits.
 - **Draw/Tie Condition:** Successful gameplay actions are resolved serially, so a fatal shot produces one winner. Transport failures can instead abort a match with no winner, as specified in the FSM. No fixed maximum number of turns is promised; loading is optional and shots are random.
 
@@ -41,11 +41,12 @@
 ### 2.1 Message Transport & Serialization Format
 - **Transport Protocol:** TCP; lab default `server.barton.edu:45700` (configurable consistently for server/client).
 - **Serialization Format:** UTF-8 JSON objects.
-- **Framing Mechanism:** One single-line JSON object followed by one LF byte (`0x0A`).
-- **Maximum Frame Payload:** Limit of 4,096 bytes, excluding LF. This is a ceiling, not padding or a target size.
+- **Framing Mechanism:** Newline-delimited JSON: one single-line object followed by exactly one LF byte (`0x0A`). Multiple complete frames in one read are extracted and dispatched in order; incomplete bytes wait for the next read.
+- **Maximum Frame Payload:** Limit of 4,096 bytes per JSON object, excluding LF; not per receive call. This is a ceiling, not padding or a target size.
+- **Termination & Recovery:** Controlled quit flushes DISCONNECT before send-side shutdown and bounded receiving/close. Bare EOF, reset, or failed write is interruption. A separate monotonic 30-second grace timer operates after failed-socket cleanup; a socket polling timeout does not forfeit a player.
 
 ### 2.2 Message Schema Definitions
-See [protocol_blueprint.md](protocol_blueprint.md) for the message inventory, field specifications, validation, privacy rules, framing behavior, and wire examples. The D1–D10 decision register is finalized there.
+See [protocol_blueprint.md](protocol_blueprint.md) for the message inventory, field specifications, validation, privacy rules, framing behavior, and wire examples. Receive extraction, EOF/exception handling, explicit socket shutdown, and the independent reconnection timer are specified there.
 
 ### 2.3 Game State Machine (FSM) Design (Sprint 1 Deliverable)
 See [fsm_specification.md](fsm_specification.md) for the Mermaid diagram, transition table, forced-turn sequence, reconnection behavior, and conformance scenarios.
