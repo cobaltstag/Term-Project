@@ -2,14 +2,14 @@
 
 **Project:** CS 457 Term-Project  
 **Author:** Andrew Barton (design decisions developed with ChatGPT)  
-**Updated:** 2026-10-02  
+**Updated:** 2026-10-04  
 **Status:** Submission candidate; reusable instructions for the later implementation stage.
 
 Use the [protocol blueprint](protocol_blueprint.md) together with the [FSM specification](fsm_specification.md). The [SOW](CS457_AndrewBarton_TermProjectSOW.md) provides course context. Resolve conflicts explicitly rather than choosing an interpretation silently.
 
 ## 1. Freeze the approved inputs
 
-If later revisions introduce new proposals, resolve and record them in a protocol decision register before requesting implementation. Before the future coding request, select the implementation language, concurrency approach, and permitted dependencies as planned for the later sprints. Bracketed prompt inputs are intentional template fields, not missing wire-protocol definitions.
+If later revisions introduce new proposals, resolve and record them in the protocol before requesting implementation. Before the future coding request, select the implementation language, concurrency approach, and permitted dependencies as planned for the later sprints. Bracketed prompt inputs are intentional template fields, not missing wire-protocol definitions.
 
 Identify the full Git commit SHA containing both approved specifications. A branch name or "latest version" alone is insufficient because its contents can change. The future agent must verify that it read the two files at that commit. The pinned specifications define observable protocol/game behavior. Later user-approved changes require an explicit specification revision and a new identified baseline; implementation convenience is not authorization to revise them.
 
@@ -25,7 +25,7 @@ Replace the bracketed inputs only after the design is approved. This is a prompt
 >
 > Before generating implementation code, identify unresolved decisions, missing requirements, and contradictions. All remaining design proposals must have an approved resolution. Do not silently invent a rule or promote a proposal to a requirement.
 >
-> Treat the approved protocol and FSM as the implementation contract. Preserve message names, directions, exact fields, types, limits, privacy boundaries, framing, validation order, heartbeat pairing/timing, connection termination behavior, game rules, and state transitions. Do not add messages, change the reward cycle, automatically retry gameplay actions, or introduce unsupported features.
+> Treat the approved protocol and FSM as the implementation contract. Preserve message names, directions, exact fields, types, limits, privacy boundaries, framing, validation order, heartbeat pairing/gameplay-completion rules and timing, connection termination behavior, game rules, and state transitions. Do not add messages, change the reward cycle, automatically retry gameplay actions, or introduce unsupported features.
 >
 > Do not modify the specifications or weaken expected test outcomes to accommodate implementation behavior. If a conflict or missing requirement prevents compliance, identify the exact passages and propose a resolution before implementing the affected behavior. Ordinary implementation choices that preserve the contract may be made without further approval. Report any requirement you cannot meet.
 >
@@ -39,9 +39,9 @@ This instruction makes adherence reviewable; it does not guarantee generated cod
 
 ## 3. Independent expected outcomes and controlled tests
 
-Use scenario expectations in the FSM (S1–S23), transport cases (C1–C18), and heartbeat cases (HSC1–HSC12) as the behavioral reference. A test must not obtain its expected result by calling the same rule implementation it is supposed to check.
+Use scenario expectations in the FSM (S1–S23), transport cases (C1–C23), and heartbeat cases (HSC1–HSC18) as the behavioral reference. A test must not obtain its expected result by calling the same rule implementation it is supposed to check.
 
-For example, S5 specifies rewards 1, 2, 4, 5, 1 and inventory totals 1, 3, 7, 12, 13 without spending. Assert those documented values rather than deriving the expected cycle through the production reward function. H4 requires an exact matching PONG or a valid message from the client: a mismatched response must leave the original deadline active.
+For example, S5 specifies rewards 1, 2, 4, 5, 1 and inventory totals 1, 3, 7, 12, 13 without spending. Assert those documented values rather than deriving the expected cycle through the production reward function. H4 permits an exact matching PONG or specifically defined incoming gameplay progress: a mismatched PONG, rejected MOVE, old snapshot, or outgoing action must leave the original deadline active. After qualifying gameplay completes probe 17, its late PONG cannot clear probe 18; an incoming PING must still be answered.
 
 Provide controlled random outcomes and a controllable monotonic clock within the test environment. This enables repeatable loaded/empty chamber samples and checks immediately before, at, and after deadlines without relying on random luck or long real-time sleeps. Use those controls to exercise behavior, not merely to mirror implementation structure.
 
@@ -55,7 +55,7 @@ Illustrative table structure, to be completed against the delivered program:
 
 | Requirement or scenario | Implementation location | Verification evidence | Status / limitation |
 |---|---|---|---|
-| H4: exact heartbeat response pairing | [actual module/function] | [executed check: wrong probe_id cannot satisfy pending probe] | [result and any limits] |
+| H4: response pairing or qualifying gameplay completion | [actual module/function] | [executed checks: accepted MOVE completes probe; wrong/late PONG cannot complete a newer probe] | [result and any limits] |
 | R3 / S10: committed action survives response failure | [actual module/function] | [executed recovery scenario with lost response] | [result and any limits] |
 | A3: opponent/cylinder/reward privacy | [actual message construction locations] | [executed checks inspecting emitted payloads] | [result and any limits] |
 
@@ -69,6 +69,6 @@ Record:
 
 ## 5. Minimum conformance coverage
 
-Minimum future checks include fragmented/coalesced frames; the 4,096/4,097 byte boundary; multibyte UTF-8 byte counting; missing/extra/wrong-type fields; forced-pass rejection; loading limits and inventory; old revisions rejected after a lost response; resume during every active phase; exact timeout boundaries; terminal-result immutability; absence of private opponent/cylinder/reward fields; and all documented transport/heartbeat cases.
+Minimum future checks include fragmented/coalesced frames; the 4,096/4,097 byte boundary; multibyte UTF-8 byte counting; missing/extra/wrong-type fields; forced-pass rejection; loading limits and inventory; old revisions rejected after a lost response; resume during every active phase; exact timeout boundaries; terminal-result immutability; absence of private opponent/cylinder/reward fields; explicit normal-exit DISCONNECT/shutdown/close; EOF loop exit without stopping accept; independent grace expiry with no socket activity; back-to-back gameplay/heartbeat frames; and all documented transport/heartbeat cases.
 
 Passing a subset is evidence only for that subset. Fix failed implementation behavior and repeat the checks affected by the fix. If a requirement cannot be verified, state that explicitly; do not claim complete conformance.
