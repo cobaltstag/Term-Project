@@ -1,19 +1,37 @@
-# Prompt Management and Future Implementation Contract
+# AI Prompts and Future Implementation Contract
 
 **Project:** CS 457 Term-Project  
 **Author:** Andrew Barton (design decisions developed with ChatGPT)  
 **Updated:** 2026-10-04  
-**Status:** Submission candidate; reusable instructions for the later implementation stage.
+**Status:** Sprint 1 prompt documentation; design-stage constraints and reusable instructions for later implementation.
 
 Use the [protocol blueprint](protocol_blueprint.md) together with the [FSM specification](fsm_specification.md). The [SOW](CS457_AndrewBarton_TermProjectSOW.md) provides course context. Resolve conflicts explicitly rather than choosing an interpretation silently.
 
-## 1. Freeze the approved inputs
+## 1. Constraints used during Sprint 1
+
+ChatGPT assisted with design review, protocol/FSM drafting, rubric comparison, and documentation edits. No finished game, client/server implementation, or socket boilerplate was requested or generated for this sprint. Diagram rendering and document/example checks verify artifacts; they are not program conformance tests.
+
+The following instructions were supplied during the design conversation. Quoted excerpts are actual user wording; summaries are labeled.
+
+> "You can't make a socket boilerplate for me."
+
+> "I have to design explicit message schemas and state transitions"
+
+These constrained the output to a blueprint with message names, directions, exact fields/types, framing rules, and authoritative transitions rather than a generic networking implementation.
+
+**Design instructions (summary):** keep the server authoritative; preserve two-player scope, independent random chamber sampling, forced-shot dare turns, private inventory and the repeating 1/2/4/5 reward cycle. Use newline-delimited JSON with a 4,096-byte ceiling and background heartbeats. Keep future implementation prompting in its own document.
+
+**Review and correction instructions (summary):** discuss unresolved behavioral choices before committing them. The final October 4 decisions keep S21's normal-join ordering, immediately replace an old connection on valid RECONNECT credentials, reject post-game result recovery, and process due heartbeat failures before grace failures. A missed terminal result is an accepted limitation. Invalid input executes no move; errors permit the player to decide to try again. These decisions take precedence over earlier drafts.
+
+The future implementation prompt below has not yet been used to generate the program. Its purpose is to constrain a later coding agent to the approved protocol/FSM and require evidence that the generated program follows them.
+
+## 2. Freeze the approved inputs
 
 If later revisions introduce new proposals, resolve and record them in the protocol before requesting implementation. Before the future coding request, select the implementation language, concurrency approach, and permitted dependencies as planned for the later sprints. Bracketed prompt inputs are intentional template fields, not missing wire-protocol definitions.
 
 Identify the full Git commit SHA containing both approved specifications. A branch name or "latest version" alone is insufficient because its contents can change. The future agent must verify that it read the two files at that commit. The pinned specifications define observable protocol/game behavior. Later user-approved changes require an explicit specification revision and a new identified baseline; implementation convenience is not authorization to revise them.
 
-## 2. Reusable future implementation prompt
+## 3. Reusable future implementation prompt
 
 Replace the bracketed inputs only after the design is approved. This is a prompt template for later use, not an instruction to implement code during the current task.
 
@@ -37,9 +55,9 @@ Replace the bracketed inputs only after the design is approved. This is a prompt
 
 This instruction makes adherence reviewable; it does not guarantee generated code is correct without verification.
 
-## 3. Independent expected outcomes and controlled tests
+## 4. Independent expected outcomes and controlled tests
 
-Use scenario expectations in the FSM (S1–S23), transport cases (C1–C23), and heartbeat cases (HSC1–HSC18) as the behavioral reference. A test must not obtain its expected result by calling the same rule implementation it is supposed to check.
+Use scenario expectations in the FSM (S1–S23), transport cases (C1–C26), and heartbeat cases (HSC1–HSC18) as the behavioral reference. A test must not obtain its expected result by calling the same rule implementation it is supposed to check.
 
 For example, S5 specifies rewards 1, 2, 4, 5, 1 and inventory totals 1, 3, 7, 12, 13 without spending. Assert those documented values rather than deriving the expected cycle through the production reward function. H4 permits an exact matching PONG or specifically defined incoming gameplay progress: a mismatched PONG, rejected MOVE, old snapshot, or outgoing action must leave the original deadline active. After qualifying gameplay completes probe 17, its late PONG cannot clear probe 18; an incoming PING must still be answered.
 
@@ -47,7 +65,7 @@ Provide controlled random outcomes and a controllable monotonic clock within the
 
 Timing tests and parser/game tests do not substitute for real TCP integration checks. The final report must distinguish simulated/controlled checks from checks using actual socket connections.
 
-## 4. Requirement traceability and verification report
+## 5. Requirement traceability and verification report
 
 Supply a compact table linking each protocol requirement/message constraint, FSM invariant/transition, and documented scenario to relevant implementation and evidence. Group related items where the mapping remains clear. Use exact field names and section references where a requirement lacks a numbered ID. Any uncovered requirement must be marked unverified rather than omitted.
 
@@ -67,8 +85,8 @@ Record:
 - Any unverified requirements, assumptions, or limitations.
 - Specification change proposals separately from implementation changes.
 
-## 5. Minimum conformance coverage
+## 6. Minimum conformance coverage
 
-Minimum future checks include fragmented/coalesced frames; the 4,096/4,097 byte boundary; multibyte UTF-8 byte counting; missing/extra/wrong-type fields; forced-pass rejection; loading limits and inventory; old revisions rejected after a lost response; resume during every active phase; exact timeout boundaries; terminal-result immutability; absence of private opponent/cylinder/reward fields; explicit normal-exit DISCONNECT/shutdown/close; EOF loop exit without stopping accept; independent grace expiry with no socket activity; back-to-back gameplay/heartbeat frames; and all documented transport/heartbeat cases.
+Minimum future checks include fragmented/coalesced frames; the 4,096/4,097 byte boundary; multibyte UTF-8 byte counting; missing/extra/wrong-type fields; forced-pass rejection; loading limits and inventory; old revisions rejected after a lost response; resume during every nonterminal active phase; exact timeout boundaries; terminal-result immutability; absence of private opponent/cylinder/reward fields; explicit normal-exit DISCONNECT/shutdown/close; EOF loop exit without stopping accept; independent grace expiry with no socket activity; back-to-back gameplay/heartbeat frames; valid-credential replacement without stale-socket mutation; rejection of post-game reconnects; heartbeat-before-grace ordering; and all documented transport/heartbeat cases.
 
 Passing a subset is evidence only for that subset. Fix failed implementation behavior and repeat the checks affected by the fix. If a requirement cannot be verified, state that explicitly; do not claim complete conformance.

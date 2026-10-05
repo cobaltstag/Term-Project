@@ -30,7 +30,7 @@
 5. **Loading:** After surviving, the player may load a positive number of banked bullets, up to both their inventory and the number of empty chambers, including filling the cylinder. Loaded bullets occupy randomly chosen distinct empty slots. There is no unloading action. Declining to load spends nothing. Version-one behavior: one accepted `LOAD` or `END_TURN` finishes the loading phase.
 6. **Pass/dare:** A normal-turn `PASS` transfers the turn and obligates the opponent to pull the trigger. If that opponent dies, the passer wins. If they survive, they earn their reward and may load or end their turn; the original passer must then pull the trigger. If the passer also survives, they earn their reward and may load or end their turn, after which the opponent has a normal turn. Neither forced turn permits another pass.
 7. **Hidden information:** Neither client receives cylinder contents, the loaded chamber count, the opponent's inventory, their loading quantity, or either next reward position. A full cylinder guarantees death for the next player who pulls the trigger. This does not identify in advance which player will be obliged to shoot. Outcomes and validation feedback may permit deductions.
-8. **Leaving:** An intentional `DISCONNECT` forfeits an active match. A detected connection interruption reserves the player's server state for a reconnection window; a successful reconnection immediately receives their authorized current state. The match pauses during a 30-second reconnection grace. Bidirectional heartbeats have a ten-second response deadline and five-second scheduling interval. A matching PONG or qualifying incoming gameplay progress satisfies an outstanding probe; late PONGs are ignored, while peer PING requests still receive replies.
+8. **Leaving:** An intentional `DISCONNECT` forfeits an active match. A detected connection interruption reserves the player's server state for a reconnection window; a successful reconnection immediately receives their authorized current state. The match pauses during a 30-second reconnection grace. Valid credentials may immediately replace an old online connection. Due heartbeat failures are processed before grace failures. Once the match ends, credentials expire; post-game result recovery is deliberately unsupported. Bidirectional heartbeats have a ten-second response deadline and five-second scheduling interval. A matching PONG or qualifying incoming gameplay progress satisfies an outstanding probe; late PONGs are ignored, while peer PING requests still receive replies.
 - **Victory Condition:** The other player is eliminated or forfeits.
 - **Draw/Tie Condition:** Successful gameplay actions are resolved serially, so a fatal shot produces one winner. Transport failures can instead abort a match with no winner, as specified in the FSM. No fixed maximum number of turns is promised; loading is optional and shots are random.
 
@@ -49,7 +49,7 @@
 See [protocol_blueprint.md](protocol_blueprint.md) for the message inventory, field specifications, validation, privacy rules, framing behavior, and wire examples. Receive extraction, EOF/exception handling, explicit socket shutdown, and the independent reconnection timer are specified there.
 
 ### 2.3 Game State Machine (FSM) Design (Sprint 1 Deliverable)
-See [fsm_specification.md](fsm_specification.md) for the Mermaid diagram, transition table, forced-turn sequence, reconnection behavior, and conformance scenarios.
+See [fsm_specification.md](fsm_specification.md) for native Mermaid lifecycle/gameplay diagrams (including INIT, GAME_START, PLAYER_TURN, EVALUATE_MOVE and explicit ERROR paths), the transition table, forced-turn sequence, reconnection behavior, and conformance scenarios.
 
 ---
 
@@ -70,7 +70,7 @@ The language, concurrency library, and synchronization implementation are later-
 ## 4. Coding & AI Implementation Plan (Sprint 3)
 
 - **AI Tools Used for Planning:** ChatGPT. Any later implementation use remains subject to course rules.
-- **AI Prompting & Constraint Strategy:** See [prompt_management.md](prompt_management.md) for the separate future implementation prompt, approved-commit pinning, specification-change boundaries, independent verification, and traceability requirements. Program generation is reserved for the implementation sprint.
+- **AI Prompting & Constraint Strategy:** See [ai_prompts.md](ai_prompts.md) for the design-stage prompting constraints and separate future implementation prompt, approved-commit pinning, specification-change boundaries, independent verification, and traceability requirements. Program generation is reserved for the implementation sprint.
 - **Implementation Risk Management:** Detail your plan to leverage past programming experience and manage time to ensure code completion on schedule.
 
 ---
