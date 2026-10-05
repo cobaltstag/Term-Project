@@ -3,7 +3,7 @@
 **Project:** CS 457 Term-Project  
 **Author:** Andrew Barton (design decisions developed with ChatGPT)  
 **Updated:** 2026-10-04  
-**Status:** Submission candidate; implementation verification remains future work.
+**Status:** Sprint 1 design aligned to the rubric and October 4 decisions; implementation verification remains future work.
 
 Use with [protocol_blueprint.md](protocol_blueprint.md). It defines bidirectional heartbeats with a ten-second deadline satisfied by a matching PONG or qualifying incoming gameplay progress. This document specifies behavior, not a threading library or socket implementation.
 
@@ -28,38 +28,68 @@ Use with [protocol_blueprint.md](protocol_blueprint.md). It defines bidirectiona
 
 Inventory and reward cycle are per player, not per global turn. There is no survival reward for PASS. No loaded chamber can become empty except through a fatal shot; that shot ends the two-player match.
 
-## 2. Diagram
+## 2. Mermaid diagrams
 
-The main diagram shows gameplay. Transport loss overlays any active phase with PAUSED; section 5 defines exact restoration and expiry.
+### 2.1 Server lifecycle and move validation
+
+The rubric's INIT, WAITING_FOR_PLAYERS, GAME_START, PLAYER_TURN, EVALUATE_MOVE, GAME_OVER and CLEANUP are explicit below. PLAYER_TURN means awaiting an action in the current wire phase, including normal, forced-shot, and loading decisions. EVALUATE_MOVE is an atomic internal step, not a new public phase or an opportunity for another action to interleave. Section 2.3 expands connection loss and pause transitions.
 
 ```mermaid
 stateDiagram-v2
     direction TB
-    [*] --> WAITING_FOR_PLAYERS
-    WAITING_FOR_PLAYERS --> TURN_CHOICE: Both players online / initialize
-    TURN_CHOICE --> FORCED_REPLY: PASS / handoff
-    TURN_CHOICE --> LOAD: TRIGGER empty / reward, context NORMAL
-    FORCED_REPLY --> LOAD: TRIGGER empty / reward, context REPLY
-    FORCED_RETURN --> LOAD: TRIGGER empty / reward, context RETURN
-    LOAD --> FORCED_RETURN: Finish with context REPLY / handoff
-    LOAD --> TURN_CHOICE: Finish with context NORMAL or RETURN / handoff
-    TURN_CHOICE --> GAME_OVER: TRIGGER loaded / opponent wins
-    FORCED_REPLY --> GAME_OVER: TRIGGER loaded / opponent wins
-    FORCED_RETURN --> GAME_OVER: TRIGGER loaded / opponent wins
-    TURN_CHOICE --> PAUSED: EOF, fatal error, or heartbeat expiry
-    FORCED_REPLY --> PAUSED: EOF, fatal error, or heartbeat expiry
-    FORCED_RETURN --> PAUSED: EOF, fatal error, or heartbeat expiry
-    LOAD --> PAUSED: EOF, fatal error, or heartbeat expiry
-    PAUSED --> TURN_CHOICE: Both online / restore saved phase if normal
-    PAUSED --> FORCED_REPLY: Both online / restore saved phase if reply
-    PAUSED --> FORCED_RETURN: Both online / restore saved phase if return
-    PAUSED --> LOAD: Both online / restore saved phase if loading
-    PAUSED --> GAME_OVER: Grace expires / timeout win or abort
-    GAME_OVER --> CLEANUP: Result retention expires
-    CLEANUP --> WAITING_FOR_PLAYERS: Fresh lobby and tokens
+    [*] --> INIT
+    INIT --> WAITING_FOR_PLAYERS: Fresh lobby and revision zero
+    WAITING_FOR_PLAYERS --> WAITING_FOR_PLAYERS: Bound MOVE / ERROR and no change
+    WAITING_FOR_PLAYERS --> GAME_START: Both seats online
+    GAME_START --> PLAYER_TURN: Random starter P1 or P2 / publish start
+    PLAYER_TURN --> EVALUATE_MOVE: MOVE
+    EVALUATE_MOVE --> PLAYER_TURN: Invalid or out of turn / ERROR
+    EVALUATE_MOVE --> PLAYER_TURN: Valid nonterminal move / apply and publish
+    EVALUATE_MOVE --> GAME_OVER: Loaded TRIGGER / opponent wins
+    PLAYER_TURN --> GAME_OVER: DISCONNECT / sender forfeits
+    GAME_OVER --> CLEANUP: Final output closed or budget expired
+    CLEANUP --> INIT: Clear match and credentials
 ```
 
-An intentional DISCONNECT reaches GAME_OVER from every active phase, including PAUSED; it is omitted from individual arrows to keep the diagram readable. Recoverable protocol errors do not advance gameplay; fatal errors retire the connection and can enter PAUSED through transport-loss handling. Successful PING/PONG exchanges are connection-control operations available in all bound non-closing phases; they do not transition gameplay. Qualifying gameplay can also complete a probe under protocol H4, with no extra transition beyond the accepted gameplay event.
+A join assigns the lowest free seat (P1 before P2), sends WELCOME, then tests whether both seats are online. An incomplete lobby remains WAITING_FOR_PLAYERS; a fully online lobby initializes once. A lobby quit or grace expiry releases that seat without a victory. P1/P2 identify seats; active_player_id identifies whose turn it is and may be either seat.
+
+Malformed complete frames receive ERROR and no gameplay mutation; they do not enter EVALUATE_MOVE as an action. Rejected moves return to the exact unchanged wire phase. Validation and an accepted action commit atomically. A failure sending its response is a subsequent event; it cannot interrupt evaluation midway, undo a reward, or reroll a shot. In GAME_OVER, credentials are invalid and sockets are closing: late frames cannot change the outcome.
+
+### 2.2 Accepted gameplay actions within PLAYER_TURN
+
+This diagram expands the stored wire phase after validation. All arrows represent accepted actions. Rejections use the unchanged-phase ERROR path above. A loaded TRIGGER from any shooting phase reaches GAME_OVER as shown in the lifecycle diagram.
+
+```mermaid
+stateDiagram-v2
+    direction TB
+    [*] --> TURN_CHOICE
+    TURN_CHOICE --> FORCED_REPLY: PASS / other player becomes active
+    TURN_CHOICE --> LOAD: TRIGGER empty / reward and context NORMAL
+    FORCED_REPLY --> LOAD: TRIGGER empty / reward and context REPLY
+    FORCED_RETURN --> LOAD: TRIGGER empty / reward and context RETURN
+    LOAD --> FORCED_RETURN: LOAD or END_TURN with REPLY / original passer active
+    LOAD --> TURN_CHOICE: LOAD or END_TURN with NORMAL or RETURN / other player active
+```
+
+The entry arrow is used at match start only. Resume restores the saved wire phase, including FORCED_REPLY, FORCED_RETURN or LOAD, rather than starting again at TURN_CHOICE. Either P1 or P2 can be the passer. Forced phases allow only TRIGGER; an invalid PASS generates ERROR without changing phase.
+
+### 2.3 Connection loss, reconnection, and forfeits
+
+This diagram overlays the active wire phases shown in section 2.2. Connection loss includes EOF, fatal socket errors/RST, and heartbeat expiry. The paused MOVE loop returns ERROR/MATCH_PAUSED. Transport failures in the lobby reserve a seat without entering PAUSED; the game has not started yet.
+
+```mermaid
+stateDiagram-v2
+    direction TB
+    PLAYER_TURN --> PAUSED: Connection lost
+    PLAYER_TURN --> GAME_OVER: DISCONNECT / opponent wins
+    PAUSED --> PAUSED: MOVE/ERROR
+    PAUSED --> PLAYER_TURN: Both online / resume
+    PAUSED --> GAME_OVER: DISCONNECT / opponent wins
+    PAUSED --> GRACE_EXPIRED: 30 s
+    GRACE_EXPIRED --> GAME_OVER: Opponent wins or abort
+```
+
+A valid RECONNECT immediately fences/replaces an old ONLINE socket without pausing gameplay. If resuming a disconnected seat while the other player remains absent, stay PAUSED and publish the current snapshot. Resume restores the saved phase and forced-turn obligations, not a new normal turn. An intentional DISCONNECT forfeits regardless of whose turn it is. Currently due heartbeat failures are processed before grace failures; if both seats are then absent, expiry aborts without a winner. GRACE_EXPIRED is an internal decision step, not a wire Phase.
 
 ## 3. States and accepted actions
 
@@ -71,8 +101,10 @@ An intentional DISCONNECT reaches GAME_OVER from every active phase, including P
 | FORCED_RETURN | TRIGGER | Original passer takes their obligatory shot after opponent survives and finishes loading. |
 | LOAD | LOAD, END_TURN | Surviving shooter makes one loading decision. LOAD is offered only with positive inventory; capacity is validated privately. |
 | PAUSED | None | Exact active phase/turn retained while recovering connections. |
-| GAME_OVER | None | Outcome fixed; result may be delivered on resume during retention. |
+| GAME_OVER | None | Outcome fixed; final messages attempted on existing sockets only; no reconnect. |
 | CLEANUP | None | Invalidate credentials, clear state, then open a new lobby. Internal transient state; not a wire Phase. |
+
+INIT and GAME_START are transient internal initialization stages. PLAYER_TURN/EVALUATE_MOVE organize the server's wait/validate/apply loop; they are not additional wire Phase values. Wire phases remain the game-specific values above.
 
 Only the active player's bound current connection may submit gameplay actions. Wrong-state/out-of-turn requests produce ERROR and no gameplay mutations.
 
@@ -87,12 +119,12 @@ Only the active player's bound current connection may submit gameplay actions. W
 | T5 | LOAD; valid LOAD | Deduct count; fill count randomly selected distinct empty slots; advance according to load_context; increment turn and revision | REPLY -> FORCED_RETURN; NORMAL/RETURN -> TURN_CHOICE; STATE_UPDATE/TURN_READY |
 | T6 | LOAD; valid END_TURN | Spend nothing; advance according to load_context; increment turn and revision | Same destination rules as T5; STATE_UPDATE/TURN_READY |
 | T7 | Active/paused match; intentional DISCONNECT | Sender forfeits; opponent wins even if disconnected; mark sender LEFT; increment revision once and freeze FORFEIT result | GAME_OVER; results to writable peers; departing client's acknowledgement/closure |
-| T8 | Invalid well-framed gameplay request | No cylinder/inventory/cycle/turn/phase change | ERROR; current private snapshot to sender |
+| T8 | Invalid well-framed gameplay request on an input-eligible connection | No cylinder/inventory/cycle/turn/phase change | ERROR; current private snapshot to sender |
 | T9 | EOF, fatal socket error, or ten-second heartbeat response expiry during active phase | Preserve current phase/turn/context; reserve seat; start that session's deadline; increment revision | PAUSED; connected opponent receives CONNECTION_LOST snapshot |
-| T10 | Valid gameplay/lobby resume before grace deadline, or result-only resume before retention deadline | Bind new connection, fence old connection, restore retained data; increment revision | WELCOME and immediate snapshot; restore saved phase only if both online and match nonterminal; terminal resume sends GAME_OVER |
+| T10 | Valid credentials in a nonterminal lobby/match; old seat ONLINE or disconnected within grace | Immediately bind new generation, fence/close old socket, preserve state; increment revision once; cancel old grace if any | WELCOME and current snapshot; restore paused phase only if both online; online replacement does not pause play |
 | T11 | Either disconnected player's grace expires during active/paused match; opponent online | Increment revision once; freeze win for opponent, loss for absent player, RECONNECT_TIMEOUT | GAME_OVER; terminal snapshot and GAME_OVER |
-| T12 | Either disconnected player's grace expires during active/paused match; opponent disconnected | Increment revision once; freeze no-winner MATCH_ABORTED result | GAME_OVER; deliver if any peer later resumes during retention |
-| T13 | Terminal retention expires | Send MATCH_CLOSED where possible; close connections; invalidate tokens; clear state | CLEANUP -> fresh WAITING_FOR_PLAYERS |
+| T12 | Either disconnected player's grace expires during active/paused match; opponent disconnected | Increment revision once; freeze no-winner MATCH_ABORTED result | GAME_OVER; no later result recovery |
+| T13 | Terminal output/close attempts finish or reach their existing five-second budgets | Dispose of closing sockets and clear match state; tokens already invalidated on GAME_OVER entry | CLEANUP -> INIT -> fresh WAITING_FOR_PLAYERS |
 
 T5/T6 handoff details:
 
@@ -101,7 +133,7 @@ T5/T6 handoff details:
 - RETURN: hand off to opponent normally and clear dare_initiator.
 - Clear load_context after handoff.
 
-On T4/T7/T11/T12, set the terminal snapshot fields as specified in protocol section 5.1: clear active turn/phase context and gameplay grace timers, retain inventories privately, and freeze the result. Connection changes thereafter may advance snapshot revision only.
+On T4/T7/T11/T12, set the terminal snapshot fields as specified in protocol section 5.1: clear active turn/phase context and gameplay grace timers, retain inventories privately, and freeze the result. Invalidate tokens at GAME_OVER entry, stop probes/gameplay input, and queue final DISCONNECT notifications after results. Subsequent transport failures finish cleanup only; no new game revision or recovery window is created.
 
 Every accepted action and its consequence complete before the next event is processed. This serial resolution contract does not select multithreading or selectors; that architecture decision belongs to a later sprint. Revalidate all guards at execution time.
 
@@ -111,13 +143,15 @@ Reconnection grace is 30 seconds from detected loss, using server monotonic time
 
 PAUSED is a temporary overlay. Preserve active_player_id, turn_id, load_context, dare_initiator, inventory, reward positions, and cylinder. A successful resume restores them without sampling or rewarding again. If the other player remains absent, stay PAUSED. No gameplay input is accepted while paused.
 
-Each disconnected seat has its own deadline. Later interruptions must not overwrite the first absent player's deadline. Invalid credentials do not extend deadlines. Process the earliest expired deadline first. Once a terminal result exists, no later loss, timeout, or disconnect changes it. Exact terminal-result revision is retained even if later connection changes increase the snapshot revision.
+Each disconnected seat has its own deadline. Later interruptions must not overwrite the first absent player's deadline. Invalid credentials do not extend deadlines. Before handling a new command, process currently due heartbeat failures before grace failures; then resolve the earliest expired grace deadline. At equal heartbeat/grace deadlines, this prevents awarding a timeout win to a peer whose heartbeat is also due to fail. Eligibility uses server monotonic time at serialized handling; equality expires. Once a terminal result exists, no later loss, timeout, or disconnect changes it.
 
 Lobby inventories/reward positions exist from seat assignment, so pre-start snapshots are well defined. Each seat addition/removal/status change increments revision; initialization is another revision. Initial joins are revisions 1 and 2, and the starting snapshot is revision 3. WELCOME must precede GAME_START on the joining connection.
 
 Before match start: interruption reserves the lobby seat for grace without changing WAITING_FOR_PLAYERS. Expiry or deliberate DISCONNECT releases that seat and token. An existing connected player remains waiting; an unbound client can claim the freed seat. No lobby forfeit creates a match victory.
 
-After match end: hold terminal state for the 30-second retention. Any non-ONLINE retained seat with its valid token may resume during result retention even after gameplay grace expired; it receives WELCOME, a terminal snapshot, and GAME_OVER. This recovers the result only. Terminal transport loss changes connection status and snapshot revision, never the frozen outcome. Invalidate all sessions at cleanup. No automatic replay/rematch is specified.
+An ONLINE seat can be replaced immediately by a fresh connection presenting valid credentials. Fence the old connection before binding the new one. This is neither a player quit nor a new loss; preserve the current phase and increment the revision once for the binding change. Old callbacks/input cannot mutate the replacement. Both clients receive current snapshots.
+
+After match end: invalidate credentials immediately; attempt terminal STATE_UPDATE, GAME_OVER, and closure notifications only on existing writable connections. Close within the existing five-second budgets, then reset through CLEANUP/INIT. Post-game RECONNECT receives RESUME_DENIED, including after a missed result. A disconnected client may never learn the winner; this is deliberately unsupported, not an unfinished feature. Starting another match requires fresh CONNECT requests; there is no automatic player replay/rematch.
 
 Both endpoints use PING/PONG to detect silent unresponsive links, as specified by protocol H1–H7. A matching PONG or qualifying incoming gameplay message completes only the receiver's outstanding probe on that connection. Server acceptance of a MOVE qualifies; client application of a newer eligible gameplay snapshot or first valid result qualifies. Rejected/duplicate traffic and outgoing actions do not. Late PONGs are ignored; incoming PINGs still receive replies. The response deadline is ten seconds after a complete probe is submitted; scheduling interval is five seconds. Expiry triggers transport loss, not immediate forfeit. Heartbeats continue during console input and gameplay pauses. Completion itself never advances state_revision; accepted gameplay retains its normal effects.
 
@@ -132,7 +166,7 @@ Each accepted socket's receive handler, including unbound CONNECT/RECONNECT hand
 
 ConnectionResetError and BrokenPipeError on a live established socket enter T9 through R5 immediately. On an already closing/retired socket they only finish cleanup; they do not establish deliberate departure. Socket TimeoutError is classified by the operation: polling timeout checks timers, failed transport retires the connection, and unbound timeout closes only that attempt.
 
-The 30-second grace uses an independent monotonic session timer after the failed socket is closed. Its guarded expiry triggers T11/T12 even if no network event occurs. A successful resume cancels/invalidates the previous timer; stale callbacks cannot terminate the resumed session. Grace expiry freezes the result; the separate terminal retention controls later token/state cleanup.
+The 30-second grace uses an independent monotonic session timer after the failed socket is closed. Its guarded expiry triggers T11/T12 even if no network event occurs, after due heartbeat failures are applied. A successful resume invalidates the previous timer; stale callbacks cannot terminate the resumed session. Grace expiry freezes the result and invalidates tokens; bounded terminal output/close then leads to cleanup.
 
 ### 5.2 Connection lifecycle overlay
 
@@ -142,15 +176,17 @@ These are internal transport states, separate from wire Phase. A player can be i
 stateDiagram-v2
     direction TB
     [*] --> UNBOUND
+    UNBOUND --> UNBOUND: Malformed complete line or schema / ERROR
     UNBOUND --> OPEN: CONNECT or RECONNECT accepted
-    UNBOUND --> CLOSED: EOF, error, or handshake timeout
-    OPEN --> CLOSING: DISCONNECT or planned closure
+    UNBOUND --> CLOSED: EOF, fatal error, or handshake timeout
+    OPEN --> CLOSING: DISCONNECT or terminal outcome
+    OPEN --> CLOSED: Superseded by valid credentials / no loss
     OPEN --> CLOSED: Unexpected EOF, fatal I/O, or heartbeat expiry
     CLOSING --> CLOSED: Output flushed and EOF, error, or close deadline
     CLOSED --> [*]
 ```
 
-CLOSING rejects gameplay and stops new probes, but may flush final output and drain bytes solely for cleanup. For client-initiated quit, the client flushes DISCONNECT, calls shutdown(SHUT_WR), receives final messages/EOF, then calls close(). The server commits that DISCONNECT before treating following EOF as expected, flushes its final frames, shuts down writes, and closes after EOF or its deadline. Protocol R9 depicts the FIN/ACK exchange and five-second bounds. A bare client close without a processed DISCONNECT instead takes interruption/grace, even if TCP closes normally.
+The original UNBOUND handshake deadline does not reset after an error. An immediately replaced socket goes CLOSED without changing its owner's game state; the new socket has its own UNBOUND-to-OPEN transition. CLOSING rejects gameplay and stops new probes, but may flush final output and drain bytes solely for cleanup. For client-initiated quit, the client flushes DISCONNECT, calls shutdown(SHUT_WR), receives final messages/EOF, then calls close(). The server commits that DISCONNECT before treating following EOF as expected, flushes its final frames, shuts down writes, and closes after EOF or its deadline. Protocol R9 depicts the FIN/ACK exchange and five-second bounds. A bare client close without a processed DISCONNECT instead takes interruption/grace, even if TCP closes normally.
 
 
 ## 6. Invariants
@@ -184,27 +220,23 @@ These are specification examples for future verification, not executable tests o
 | S8 | Full cylinder; next active player passes normally | Opponent must shoot and dies; the player who filled the cylinder is not guaranteed to win merely by filling it. |
 | S9 | Disconnect during FORCED_REPLY, FORCED_RETURN, or LOAD; reconnect before deadline | Exact phase/context/turn restored, own inventory delivered, no pass newly enabled and no extra reward. |
 | S10 | TRIGGER accepted and survives; response lost; client reconnects | Snapshot already shows LOAD and awarded inventory; no resampling. Old-revision retry is rejected by the earlier active/paused guard or STALE_STATE; it cannot repeat the action. |
-| S11 | Current session deliberately DISCONNECTs during active or paused play | Immediate FORFEIT; no grace, opponent wins; result retained if opponent currently absent. |
+| S11 | Current session deliberately DISCONNECTs during active or paused play | Immediate FORFEIT; no grace, opponent wins even if absent; no post-game result retrieval. |
 | S12 | Valid reconnect before deadline vs at exact deadline | Before succeeds; equality is expired and cannot resume active play. |
 | S13 | One absent player's grace expires with opponent online | Online opponent wins through RECONNECT_TIMEOUT. |
-| S14 | Both absent; earliest grace expires | MATCH_ABORTED, no winner; later reconnect cannot change result. |
+| S14 | Both absent after due heartbeat handling; earliest grace expires | MATCH_ABORTED, no winner; later reconnect is denied. |
 | S15 | Partial frames and multiple frames in one read | Only complete LF-terminated objects execute, in order; suffix retained. |
 | S16 | Exactly 4,096 object bytes plus LF vs 4,097 bytes | First size accepted, second FRAME_TOO_LARGE; limits count UTF-8 bytes, not characters. |
 | S17 | Opponent loads vs declines to load | Opponent-facing TURN_READY snapshot contains neither loading amount nor their inventory, cylinder count, or reward position. |
 | S18 | Fatal result followed by disconnect/timeout | Original result remains unchanged. |
 | S19 | Lost lobby connection resumes vs expires | Resume restores seat; expiry releases it; no match winner is invented. |
 | S20 | Superseded connection sends a late MOVE after resume | It cannot mutate the rebound session or game. |
+| S21 | Both players join from a fresh lobby without failures | WELCOME precedes all post-binding messages; revisions 1/2 for joins and 3 for initialization. |
+| S22 | Valid RECONNECT reaches server while old connection is still ONLINE | Immediately replace and fence old binding; WELCOME and current snapshot, no forfeit or extra pause. |
+| S23 | Player misses the game-over result and attempts RECONNECT after terminal resolution | RESUME_DENIED; result retrieval deliberately unsupported; client cannot infer a winner. |
 
-Transport-specific checks C1–C23 in protocol section 6.6 supplement S1–S20, including EOF vs intent, partial writes, recoverable exceptions, loss callback idempotency, and failed cleanup. Heartbeat cases HSC1–HSC18 in section 6.7 additionally verify response matching or gameplay completion, late-response handling, ten-second expiry, background progress, and connection-generation isolation.
+Transport-specific checks C1–C26 in protocol section 6.6 supplement S1–S23, including EOF vs intent, partial writes, recoverable exceptions, loss callback idempotency, and failed cleanup. Heartbeat cases HSC1–HSC18 in section 6.7 additionally verify response matching or gameplay completion, late-response handling, ten-second expiry, background progress, and connection-generation isolation.
 
-Additional final-review scenarios:
-
-| ID | Given / sequence | Required outcome |
-|---|---|---|
-| S21 | Both players join from a fresh lobby without failures | Welcome precedes all other messages to each new client; revisions 1/2 for joins and 3 for initialization. |
-| S22 | Client detects loss first; valid RECONNECT reaches server before old connection is retired | RESUME_BUSY, old binding preserved, one-second bounded retries; later resume succeeds if still eligible. |
-| S23 | Player misses GAME_OVER and gameplay grace has already expired | During terminal retention, valid token recovers terminal snapshot/result; no game restart. |
 
 ## 8. Review boundary
 
-Use the wire revision trace in protocol section 7.1 to check message ordering against transitions. The separate [prompt_management.md](prompt_management.md) defines the future implementation contract and verification report. Before coding, identify the approved specification commit and settle the later-sprint language/concurrency/dependency choices. Runtime behavior remains unverified until implementation and execution.
+Use the wire revision trace in protocol section 7.1 to check message ordering against transitions. The separate [ai_prompts.md](ai_prompts.md) defines the future implementation contract and verification report. Before coding, identify the approved specification commit and settle the later-sprint language/concurrency/dependency choices. Runtime behavior remains unverified until implementation and execution.
