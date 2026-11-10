@@ -2,10 +2,12 @@
 
 import argparse
 from dataclasses import dataclass
+import os
 from queue import Empty, Queue
 import selectors
 import socket
 import sys
+from textwrap import wrap
 from threading import Thread
 import time
 
@@ -18,6 +20,32 @@ from protocol import (
 COMMANDS = {"trigger": "TRIGGER", "pass": "PASS", "load": "LOAD", "end": "END_TURN", "end_turn": "END_TURN"}
 CHOICES = {"TRIGGER": "trigger", "PASS": "pass", "LOAD": "load NUMBER", "END_TURN": "end"}
 RESULT_TEXT = {"SHOT": "fatal shot", "FORFEIT": "forfeit", "RECONNECT_TIMEOUT": "reconnect timeout"}
+
+
+def supports_border_color():
+    if not sys.stdout.isatty() or os.getenv("NO_COLOR") or os.getenv("TERM") == "dumb":
+        return False
+    if sys.platform != "win32":
+        return True
+
+    import ctypes
+    import msvcrt
+    from ctypes import wintypes
+
+    try:
+        handle = wintypes.HANDLE(msvcrt.get_osfhandle(sys.stdout.fileno()))
+    except (OSError, ValueError):
+        return False
+    console = ctypes.windll.kernel32
+    mode = wintypes.DWORD()
+    if not console.GetConsoleMode(handle, ctypes.byref(mode)):
+        return False
+    processed_output = 0x0001
+    virtual_terminal_processing = 0x0004
+    flags = processed_output | virtual_terminal_processing
+    if (mode.value & flags) == flags:
+        return True
+    return bool(console.SetConsoleMode(handle, wintypes.DWORD(mode.value | flags)))
 
 
 def dial(hostname, port):
@@ -91,10 +119,12 @@ class Console:
 
 
 class Client:
-    def __init__(self, selector, hostname, port):
+    def __init__(self, selector, hostname, port, style="table"):
         self.selector = selector
         self.hostname = hostname
         self.port = port
+        self.style = style
+        self.red_borders = style == "table" and supports_border_color()
         self.peer = None
         self.registered = 0
         self.generation = 0
@@ -239,26 +269,49 @@ class Client:
         self.peer.queue(move(action, prompt.turn, prompt.revision, count))
         self.pending_move = True
 
+    def show_panel(self, title, *lines):
+        if self.style == "log":
+            prefix = "\n" if self.prompt is not None else ""
+            print(f"{prefix}[{title}] {' | '.join(lines)}", flush=True)
+            return
+
+        width = 68
+        border = "+" + "-" * (width + 2) + "+"
+        side = "|"
+        if self.red_borders:
+            border = f"\x1b[31m{border}\x1b[39m"
+            side = f"\x1b[31m{side}\x1b[39m"
+        heading = [f"{side} {part:<{width}} {side}" for part in wrap(title, width)]
+        body = []
+        for line in lines:
+            body.extend(f"{side} {part:<{width}} {side}" for part in wrap(line, width))
+        print("\n".join(("", border, *heading, border, *body, border)), flush=True)
+
     def show_snapshot(self, payload):
         phase = payload["phase"]
         own = payload["self"]
         if phase == "WAITING_FOR_PLAYERS":
-            print("Waiting for both players to be online.", flush=True)
+            self.show_panel("Lobby", "Waiting for both players to be online.")
         elif phase == "PAUSED":
-            print("Match paused while a player reconnects.", flush=True)
+            self.show_panel("Paused", "Match paused while a player reconnects.")
         elif phase != "GAME_OVER":
             active = payload["active_player_id"]
+            title = f"Turn {payload['turn_id']}"
             if phase == "LOAD":
+                title += " / Loading"
                 status = f"{active} survived the shot and is deciding whether to load"
             elif phase == "FORCED_REPLY":
+                title += " / Dare reply"
                 passer = "P2" if active == "P1" else "P1"
                 status = f"{passer} passed. {active} must pull the trigger"
             elif phase == "FORCED_RETURN":
+                title += " / Dare return"
                 status = f"{active} must pull the trigger in return after the opponent survived"
             else:
                 status = f"{active} to play"
-            print(f"Turn {payload['turn_id']} | {status} | "
-                  f"Your banked bullets: {own['inventory']}", flush=True)
+            if payload["allowed_actions"]:
+                title += " / Your move"
+            self.show_panel(title, status, f"Your banked bullets: {own['inventory']}")
 
     def apply_snapshot(self, payload):
         if payload["self"]["player_id"] != self.credentials["player_id"]:
@@ -304,7 +357,7 @@ class Client:
             self.credentials = payload
             self.welcomed = True
             self.peer.start_heartbeats(time.monotonic())
-            print(f"You are {payload['player_id']}. Press Ctrl+C to quit at any time.", flush=True)
+            self.show_panel("RED ROULETTE", f"You are {payload['player_id']}.", "Press Ctrl+C to quit at any time.")
             return
         if not self.welcomed or kind == "WELCOME":
             raise ProtocolError("INVALID_SCHEMA", "Unexpected server handshake order.")
@@ -326,10 +379,11 @@ class Client:
                 self.peer.stop_heartbeats()
                 self.result = payload
                 if payload["winner_id"] is None:
-                    print("Match ended without a winner.", flush=True)
+                    self.show_panel("Result", "Match ended without a winner.")
                 else:
                     outcome = "You win" if payload["winner_id"] == self.credentials["player_id"] else "You lose"
-                    print(f"{outcome}. {payload['winner_id']} wins by {RESULT_TEXT[payload['reason']]}.", flush=True)
+                    self.show_panel("Result", f"{outcome}. {payload['winner_id']} wins by "
+                                    f"{RESULT_TEXT[payload['reason']]}.")
         elif kind == "DISCONNECT":
             self.draining = True
             self.peer.begin_close(time.monotonic())
@@ -434,12 +488,14 @@ def main():
                         help="server DNS hostname (default: %(default)s)")
     parser.add_argument("-p", "--port", type=int, default=DEFAULT_PORT,
                         help="server TCP port (default: %(default)s)")
+    parser.add_argument("--style", choices=("table", "log"), default="table",
+                        help="terminal layout (default: %(default)s)")
     args = parser.parse_args()
     if not 1 <= args.port <= 65535:
         parser.error("port must be between 1 and 65535")
     try:
         with selectors.DefaultSelector() as selector:
-            return Client(selector, args.hostname, args.port).run()
+            return Client(selector, args.hostname, args.port, args.style).run()
     except KeyboardInterrupt:
         return 0
 

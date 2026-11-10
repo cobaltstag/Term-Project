@@ -15,6 +15,36 @@ Use the full path to the bundled Python executable in PowerShell if `python` is 
 
 The server randomly chooses who goes first once both players have joined. On a normal turn, `trigger` fires and `pass` dares the other player to shoot. If they survive and finish their loading decision, you must shoot in return. After surviving a shot, enter `load NUMBER` to spend banked bullets or `end` to hand over the turn. Use `quit` at a prompt or Ctrl+C to leave. After a connection interruption, follow the prompt to `reconnect` while the original process retains the session and the server's grace window is still open. If a prompt is obsolete, press Enter to refresh it.
 
+## Compare the console styles
+
+Choose a style when you start each client. The table is the default on this branch. The log keeps more of the match visible in a short terminal window.
+
+```text
+python client.py -i localhost --style table
+python client.py -i localhost --style log
+```
+
+The table gives the current phase and inventory their own rows.
+
+```text
++----------------------------------------------------------------------+
+| Turn 2 / Dare reply / Your move                                      |
++----------------------------------------------------------------------+
+| P2 passed. P1 must pull the trigger                                  |
+| Your banked bullets: 0                                               |
++----------------------------------------------------------------------+
+Choose trigger / quit:
+```
+
+The log displays that same turn on one line above the prompt.
+
+```text
+[Turn 2 / Dare reply / Your move] P2 passed. P1 must pull the trigger | Your banked bullets: 0
+Choose trigger / quit:
+```
+
+Both styles draw with ASCII characters and append updates to the terminal's scrollback. The table draws its borders in red on supported terminals. Redirecting output or setting `NO_COLOR=1` gives you plain borders.
+
 ## Implementation baseline
 
 The [GitHub design commit](https://github.com/cobaltstag/Term-Project/commit/55ce92953f1826247694bfee50b1db5e95591adf) specifies the wire protocol and state machine. Two decisions from the implementation discussion govern the code. The starter is random after both seats are online. Due write and heartbeat failures are both processed before the server awards a reconnect-timeout win.
@@ -22,6 +52,8 @@ The [GitHub design commit](https://github.com/cobaltstag/Term-Project/commit/55c
 ## Verification
 
 Run `python -B -m unittest -v test_game` with `test_game.py` in the program folder. The initial implementation passed all 22 tests with `python -B -W error::ResourceWarning -m unittest -v test_game`. The suite uses a scripted starter and chamber sequence for repeatable outcomes, a controlled clock for deadline boundaries, and real loopback TCP with separate console processes. Tests also check the help screens, hostname resolution failure, and connection refusal. For the console wording update, ten tests that need no network passed and an in-memory replay verified the reported moves. The environment blocked the loopback rerun.
+
+For the style prototypes, ten tests that need no network passed. A two-client replay through the server in memory verified the lobby, dare, loading decision, result, and inventory display in both styles. The environment blocked local TCP connections.
 
 | Requirement | Implementation | Executed coverage |
 |---|---|---|
