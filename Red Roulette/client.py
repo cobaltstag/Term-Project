@@ -2,6 +2,7 @@
 
 import argparse
 from dataclasses import dataclass
+import os
 from queue import Empty, Queue
 import selectors
 import socket
@@ -19,6 +20,32 @@ from protocol import (
 COMMANDS = {"trigger": "TRIGGER", "pass": "PASS", "load": "LOAD", "end": "END_TURN", "end_turn": "END_TURN"}
 CHOICES = {"TRIGGER": "trigger", "PASS": "pass", "LOAD": "load NUMBER", "END_TURN": "end"}
 RESULT_TEXT = {"SHOT": "fatal shot", "FORFEIT": "forfeit", "RECONNECT_TIMEOUT": "reconnect timeout"}
+
+
+def supports_border_color():
+    if not sys.stdout.isatty() or os.getenv("NO_COLOR") or os.getenv("TERM") == "dumb":
+        return False
+    if sys.platform != "win32":
+        return True
+
+    import ctypes
+    import msvcrt
+    from ctypes import wintypes
+
+    try:
+        handle = wintypes.HANDLE(msvcrt.get_osfhandle(sys.stdout.fileno()))
+    except (OSError, ValueError):
+        return False
+    console = ctypes.windll.kernel32
+    mode = wintypes.DWORD()
+    if not console.GetConsoleMode(handle, ctypes.byref(mode)):
+        return False
+    processed_output = 0x0001
+    virtual_terminal_processing = 0x0004
+    flags = processed_output | virtual_terminal_processing
+    if (mode.value & flags) == flags:
+        return True
+    return bool(console.SetConsoleMode(handle, wintypes.DWORD(mode.value | flags)))
 
 
 def dial(hostname, port):
@@ -97,6 +124,7 @@ class Client:
         self.hostname = hostname
         self.port = port
         self.style = style
+        self.red_borders = style == "table" and supports_border_color()
         self.peer = None
         self.registered = 0
         self.generation = 0
@@ -249,10 +277,14 @@ class Client:
 
         width = 68
         border = "+" + "-" * (width + 2) + "+"
-        heading = [f"| {part:<{width}} |" for part in wrap(title, width)]
+        side = "|"
+        if self.red_borders:
+            border = f"\x1b[31m{border}\x1b[39m"
+            side = f"\x1b[31m{side}\x1b[39m"
+        heading = [f"{side} {part:<{width}} {side}" for part in wrap(title, width)]
         body = []
         for line in lines:
-            body.extend(f"| {part:<{width}} |" for part in wrap(line, width))
+            body.extend(f"{side} {part:<{width}} {side}" for part in wrap(line, width))
         print("\n".join(("", border, *heading, border, *body, border)), flush=True)
 
     def show_snapshot(self, payload):

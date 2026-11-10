@@ -43,7 +43,7 @@ The log displays that same turn on one line above the prompt.
 Choose trigger / quit:
 ```
 
-Both styles use plain ASCII and append updates to the terminal's scrollback.
+Both styles draw with ASCII characters and append updates to the terminal's scrollback. The table draws its borders in red on supported terminals. Redirecting output or setting `NO_COLOR=1` gives you plain borders.
 
 ## Implementation baseline
 
