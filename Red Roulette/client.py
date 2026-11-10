@@ -219,7 +219,11 @@ class Client:
         action = COMMANDS.get(tokens[0])
         count = None
         if action not in prompt.actions:
-            print("Choose one of the offered actions.", flush=True)
+            if action == "TRIGGER" and self.snapshot["phase"] == "LOAD":
+                choices = " or ".join(CHOICES[allowed] for allowed in prompt.actions)
+                print(f"You already fired this turn. Use {choices}.", flush=True)
+            else:
+                print("Choose one of the offered actions.", flush=True)
             return
         if action == "LOAD":
             if len(tokens) != 2 or not tokens[1].isascii() or not tokens[1].isdigit() or len(tokens[1]) > 4:
@@ -243,12 +247,18 @@ class Client:
         elif phase == "PAUSED":
             print("Match paused while a player reconnects.", flush=True)
         elif phase != "GAME_OVER":
-            print(f"Turn {payload['turn_id']} | {payload['active_player_id']} to play | "
+            active = payload["active_player_id"]
+            if phase == "LOAD":
+                status = f"{active} survived the shot and is deciding whether to load"
+            elif phase == "FORCED_REPLY":
+                passer = "P2" if active == "P1" else "P1"
+                status = f"{passer} passed. {active} must pull the trigger"
+            elif phase == "FORCED_RETURN":
+                status = f"{active} must pull the trigger in return after the opponent survived"
+            else:
+                status = f"{active} to play"
+            print(f"Turn {payload['turn_id']} | {status} | "
                   f"Your banked bullets: {own['inventory']}", flush=True)
-            if payload["event"] == "SURVIVED":
-                print(f"{payload['active_player_id']} survived the shot.", flush=True)
-            if phase in ("FORCED_REPLY", "FORCED_RETURN"):
-                print("The active player must pull the trigger.", flush=True)
 
     def apply_snapshot(self, payload):
         if payload["self"]["player_id"] != self.credentials["player_id"]:

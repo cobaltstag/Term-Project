@@ -13,7 +13,7 @@ python client.py -i localhost
 
 Use the full path to the bundled Python executable in PowerShell if `python` is unavailable as a command. Both programs support `-h`. The server binds to `0.0.0.0` and listens on TCP port `45700` by default. Use `-p` on both sides to select a different port. The client defaults to `server.barton.edu` for CML.
 
-The server randomly chooses who goes first once both players have joined. Enter `trigger` or `pass` as offered. After surviving a shot, enter `load NUMBER` to spend banked bullets or `end` to hand over the turn. Use `quit` at a prompt or Ctrl+C to leave. After a connection interruption, follow the prompt to `reconnect` while the original process retains the session and the server's grace window is still open. If a prompt is obsolete, press Enter to refresh it.
+The server randomly chooses who goes first once both players have joined. On a normal turn, `trigger` fires and `pass` dares the other player to shoot. If they survive and finish their loading decision, you must shoot in return. After surviving a shot, enter `load NUMBER` to spend banked bullets or `end` to hand over the turn. Use `quit` at a prompt or Ctrl+C to leave. After a connection interruption, follow the prompt to `reconnect` while the original process retains the session and the server's grace window is still open. If a prompt is obsolete, press Enter to refresh it.
 
 ## Implementation baseline
 
@@ -21,7 +21,7 @@ The [GitHub design commit](https://github.com/cobaltstag/Term-Project/commit/55c
 
 ## Verification
 
-Run `python -B -m unittest -v test_game` with `test_game.py` in the program folder. All 22 tests passed with `python -B -W error::ResourceWarning -m unittest -v test_game`. The suite uses a scripted starter and chamber sequence for repeatable outcomes, a controlled clock for deadline boundaries, and real loopback TCP with separate console processes. Tests also check the help screens, hostname resolution failure, and connection refusal.
+Run `python -B -m unittest -v test_game` with `test_game.py` in the program folder. The initial implementation passed all 22 tests with `python -B -W error::ResourceWarning -m unittest -v test_game`. The suite uses a scripted starter and chamber sequence for repeatable outcomes, a controlled clock for deadline boundaries, and real loopback TCP with separate console processes. Tests also check the help screens, hostname resolution failure, and connection refusal. For the console wording update, ten tests that need no network passed and an in-memory replay verified the reported moves. The environment blocked the loopback rerun.
 
 | Requirement | Implementation | Executed coverage |
 |---|---|---|
