@@ -56,7 +56,7 @@ sequenceDiagram
             S->>A: STATE_UPDATE: TURN_READY, active player B
         end
     end
-    ```
+```
 
 ### Two Player Loop Demonstrating 'PASS' Flow and Architecture with Non-Terminal Handoff Paths:
 
@@ -109,4 +109,4 @@ sequenceDiagram
 
     S->>A: STATE_UPDATE: A active, current allowed actions
     S->>B: STATE_UPDATE: A active, no allowed actions
-    ```
+```
