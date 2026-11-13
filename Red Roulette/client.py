@@ -17,13 +17,32 @@ from protocol import (
 )
 
 
-COMMANDS = {"trigger": "TRIGGER", "pass": "PASS", "load": "LOAD", "end": "END_TURN", "end_turn": "END_TURN"}
-CHOICES = {"TRIGGER": "trigger", "PASS": "pass", "LOAD": "load NUMBER", "END_TURN": "end"}
-RESULT_TEXT = {"SHOT": "fatal shot", "FORFEIT": "forfeit", "RECONNECT_TIMEOUT": "reconnect timeout"}
+COMMANDS = {
+    "trigger": "TRIGGER",
+    "pass": "PASS",
+    "load": "LOAD",
+    "end": "END_TURN",
+    "end_turn": "END_TURN",
+}
+CHOICES = {
+    "TRIGGER": "trigger",
+    "PASS": "pass",
+    "LOAD": "load NUMBER",
+    "END_TURN": "end",
+}
+RESULT_TEXT = {
+    "SHOT": "fatal shot",
+    "FORFEIT": "forfeit",
+    "RECONNECT_TIMEOUT": "reconnect timeout",
+}
 
 
 def supports_border_color():
-    if not sys.stdout.isatty() or os.getenv("NO_COLOR") or os.getenv("TERM") == "dumb":
+    if (
+        not sys.stdout.isatty()
+        or os.getenv("NO_COLOR")
+        or os.getenv("TERM") == "dumb"
+    ):
         return False
     if sys.platform != "win32":
         return True
@@ -45,7 +64,8 @@ def supports_border_color():
     flags = processed_output | virtual_terminal_processing
     if (mode.value & flags) == flags:
         return True
-    return bool(console.SetConsoleMode(handle, wintypes.DWORD(mode.value | flags)))
+    return bool(console.SetConsoleMode(
+        handle, wintypes.DWORD(mode.value | flags)))
 
 
 def dial(hostname, port):
@@ -54,7 +74,8 @@ def dial(hostname, port):
 
     def resolve():
         try:
-            addresses = socket.getaddrinfo(hostname, port, type=socket.SOCK_STREAM)
+            addresses = socket.getaddrinfo(
+                hostname, port, type=socket.SOCK_STREAM)
         except (OSError, UnicodeError) as error:
             lookup.put(error)
         else:
@@ -101,6 +122,8 @@ class Prompt:
 
 
 class Console:
+    """Read blocking terminal input off the socket event loop."""
+
     def __init__(self):
         self.requests = Queue()
         self.answers = Queue()
@@ -119,6 +142,8 @@ class Console:
 
 
 class Client:
+    """Track a player's session, prompt, and TCP stream."""
+
     def __init__(self, selector, hostname, port, style="table"):
         self.selector = selector
         self.hostname = hostname
@@ -146,11 +171,18 @@ class Client:
         try:
             sock = dial(self.hostname, self.port)
         except (socket.gaierror, UnicodeError):
-            print(f"Could not resolve server hostname {self.hostname!r}. "
-                  "Check the hostname and your router's DNS configuration.", file=sys.stderr)
+            print(
+                f"Could not resolve server hostname {self.hostname!r}. "
+                "Check the hostname and your router's DNS configuration.",
+                file=sys.stderr,
+            )
         except OSError:
-            print(f"Could not connect to {self.hostname!r} on port {self.port}. "
-                  "Check that the server is running and that the port and network are correct.", file=sys.stderr)
+            print(
+                f"Could not connect to {self.hostname!r} "
+                f"on port {self.port}. Check that the server is running "
+                "and that the port and network are correct.",
+                file=sys.stderr,
+            )
         else:
             self.peer = Peer(sock)
             self.generation += 1
@@ -161,10 +193,12 @@ class Client:
             self.sync_deadline = time.monotonic() + IO_BUDGET
             frame = message("CONNECT")
             if resume:
-                frame = message("RECONNECT", match_id=self.credentials["match_id"],
-                                session_token=self.credentials["session_token"])
+                frame = message(
+                    "RECONNECT", match_id=self.credentials["match_id"],
+                    session_token=self.credentials["session_token"])
             self.peer.queue(frame)
-            print(f"Connected to {self.hostname} on port {self.port}.", flush=True)
+            address = f"{self.hostname} on port {self.port}"
+            print(f"Connected to {address}.", flush=True)
             return True
         return False
 
@@ -187,7 +221,11 @@ class Client:
             print(detail, file=sys.stderr, flush=True)
             self.status = 1
         else:
-            print(f"{detail} Type reconnect when prompted to try your current seat.", flush=True)
+            print(
+                f"{detail} Type reconnect when prompted to try "
+                "your current seat.",
+                flush=True,
+            )
             if self.prompt is not None:
                 print("Press Enter to refresh the prompt.", flush=True)
 
@@ -214,18 +252,24 @@ class Client:
         if self.snapshot is not None and not self.pending_move:
             actions = tuple(self.snapshot["allowed_actions"])
             if actions:
-                return Prompt(self.generation, self.snapshot["turn_id"], self.snapshot["state_revision"], actions)
+                return Prompt(
+                    self.generation, self.snapshot["turn_id"],
+                    self.snapshot["state_revision"],
+                    actions)
         return None
 
     def offer_prompt(self):
         current = self.current_prompt()
         if self.prompt is None and current is not None:
             self.prompt = current
-            choices = [CHOICES.get(action, action) for action in current.actions]
-            print(f"Choose {' / '.join((*choices, 'quit'))}: ", end="", flush=True)
+            choices = [CHOICES.get(action, action)
+                       for action in current.actions]
+            print(f"Choose {' / '.join((*choices, 'quit'))}: ",
+                  end="", flush=True)
             self.console.requests.put(current)
 
     def process_input(self):
+        """Send a move only while its prompt matches the state."""
         try:
             prompt, line = self.console.answers.get_nowait()
         except Empty:
@@ -250,18 +294,30 @@ class Client:
         count = None
         if action not in prompt.actions:
             if action == "TRIGGER" and self.snapshot["phase"] == "LOAD":
-                choices = " or ".join(CHOICES[allowed] for allowed in prompt.actions)
-                print(f"You already fired this turn. Use {choices}.", flush=True)
+                choices = " or ".join(CHOICES[allowed]
+                                      for allowed in prompt.actions)
+                print(
+                    f"You already fired this turn. Use {choices}.",
+                    flush=True)
             else:
                 print("Choose one of the offered actions.", flush=True)
             return
         if action == "LOAD":
-            if len(tokens) != 2 or not tokens[1].isascii() or not tokens[1].isdigit() or len(tokens[1]) > 4:
-                print("Enter load followed by a positive bullet count.", flush=True)
+            if (
+                len(tokens) != 2
+                or not tokens[1].isascii()
+                or not tokens[1].isdigit()
+                or len(tokens[1]) > 4
+            ):
+                print(
+                    "Enter load followed by a positive bullet count.",
+                    flush=True)
                 return
             count = int(tokens[1])
             if not 1 <= count <= self.snapshot["self"]["inventory"]:
-                print("Choose a positive count within your inventory.", flush=True)
+                print(
+                    "Choose a positive count within your inventory.",
+                    flush=True)
                 return
         elif len(tokens) != 1:
             print("This action takes no arguments.", flush=True)
@@ -281,11 +337,16 @@ class Client:
         if self.red_borders:
             border = f"\x1b[31m{border}\x1b[39m"
             side = f"\x1b[31m{side}\x1b[39m"
-        heading = [f"{side} {part:<{width}} {side}" for part in wrap(title, width)]
+        heading = [
+            f"{side} {part:<{width}} {side}" for part in wrap(title, width)
+        ]
         body = []
         for line in lines:
-            body.extend(f"{side} {part:<{width}} {side}" for part in wrap(line, width))
-        print("\n".join(("", border, *heading, border, *body, border)), flush=True)
+            body.extend(
+                f"{side} {part:<{width}} {side}" for part in wrap(line, width)
+            )
+        rows = ("", border, *heading, border, *body, border)
+        print("\n".join(rows), flush=True)
 
     def show_snapshot(self, payload):
         phase = payload["phase"]
@@ -293,35 +354,50 @@ class Client:
         if phase == "WAITING_FOR_PLAYERS":
             self.show_panel("Lobby", "Waiting for both players to be online.")
         elif phase == "PAUSED":
-            self.show_panel("Paused", "Match paused while a player reconnects.")
+            self.show_panel(
+                "Paused", "Match paused while a player reconnects.")
         elif phase != "GAME_OVER":
             active = payload["active_player_id"]
             title = f"Turn {payload['turn_id']}"
             if phase == "LOAD":
                 title += " / Loading"
-                status = f"{active} survived the shot and is deciding whether to load"
+                status = (
+                    f"{active} survived the shot and is deciding "
+                    "whether to load"
+                )
             elif phase == "FORCED_REPLY":
                 title += " / Dare reply"
                 passer = "P2" if active == "P1" else "P1"
                 status = f"{passer} passed. {active} must pull the trigger"
             elif phase == "FORCED_RETURN":
                 title += " / Dare return"
-                status = f"{active} must pull the trigger in return after the opponent survived"
+                status = (
+                    f"{active} must pull the trigger in return "
+                    "after the opponent survived"
+                )
             else:
                 status = f"{active} to play"
             if payload["allowed_actions"]:
                 title += " / Your move"
-            self.show_panel(title, status, f"Your banked bullets: {own['inventory']}")
+            inventory = f"Your banked bullets: {own['inventory']}"
+            self.show_panel(title, status, inventory)
 
     def apply_snapshot(self, payload):
+        """Apply a current snapshot scoped to this player's seat."""
         if payload["self"]["player_id"] != self.credentials["player_id"]:
-            raise ProtocolError("INVALID_SCHEMA", "The state update is for a different player.")
-        before = -1 if self.snapshot is None else self.snapshot["state_revision"]
+            raise ProtocolError("INVALID_SCHEMA",
+                                "The state update is for a different player.")
+        before = (
+            -1 if self.snapshot is None else self.snapshot["state_revision"]
+        )
         revision = payload["state_revision"]
         if revision < before:
             return
-        if self.terminal and (payload["phase"] != "GAME_OVER" or revision != before):
-            raise ProtocolError("INVALID_SCHEMA", "The server changed a completed match.")
+        if self.terminal and (payload["phase"] !=
+                              "GAME_OVER" or revision != before):
+            raise ProtocolError(
+                "INVALID_SCHEMA",
+                "The server changed a completed match.")
         probe = self.peer.probe
         if (probe is not None and revision > max(before, probe.revision)
                 and payload["event"] in GAMEPLAY_EVENTS):
@@ -333,16 +409,25 @@ class Client:
         if self.terminal:
             self.peer.next_tick = None
         self.show_snapshot(payload)
-        if self.prompt is not None and self.prompt != self.current_prompt() and not self.terminal:
-            print("Press Enter to refresh the prompt if your choices changed.", flush=True)
+        if (
+            self.prompt is not None
+            and self.prompt != self.current_prompt()
+            and not self.terminal
+        ):
+            print(
+                "Press Enter to refresh the prompt if your choices changed.",
+                flush=True)
 
     def handle(self, frame):
         kind = validate(frame, "server")
         payload = frame["payload"]
         if kind not in SERVER_TYPES:
-            raise ProtocolError("INVALID_SCHEMA", "The server sent a client-only message.")
+            raise ProtocolError(
+                "INVALID_SCHEMA",
+                "The server sent a client-only message.")
         if kind == "ERROR":
-            detail = payload["detail"].encode("utf-8", "backslashreplace").decode("utf-8")
+            # Render network-supplied control characters visibly.
+            detail = ascii(payload["detail"])[1:-1]
             print(f"{payload['code']}: {detail}", file=sys.stderr, flush=True)
             if payload["fatal"]:
                 if payload["code"] == "RESUME_DENIED":
@@ -350,30 +435,51 @@ class Client:
                 self.disconnected("The server closed this connection.")
             return
         if kind == "WELCOME" and not self.welcomed:
-            if payload["resumed"] != self.resuming or (self.resuming and any(
-                    payload[key] != self.credentials[key] for key in ("match_id", "player_id", "session_token")
-            )):
-                raise ProtocolError("INVALID_SCHEMA", "The server returned a different session.")
+            if payload["resumed"] != self.resuming or (
+                self.resuming and any(
+                    payload[key] != self.credentials[key]
+                    for key in ("match_id", "player_id", "session_token")
+                )
+            ):
+                raise ProtocolError(
+                    "INVALID_SCHEMA",
+                    "The server returned a different session.")
             self.credentials = payload
             self.welcomed = True
             self.peer.start_heartbeats(time.monotonic())
-            self.show_panel("RED ROULETTE", f"You are {payload['player_id']}.", "Press Ctrl+C to quit at any time.")
+            self.show_panel(
+                "RED ROULETTE",
+                f"You are {payload['player_id']}.",
+                "Press Ctrl+C to quit at any time.")
             return
         if not self.welcomed or kind == "WELCOME":
-            raise ProtocolError("INVALID_SCHEMA", "Unexpected server handshake order.")
-        if "match_id" in payload and payload["match_id"] != self.credentials["match_id"]:
-            raise ProtocolError("INVALID_SCHEMA", "The server sent a message for a different match.")
+            raise ProtocolError(
+                "INVALID_SCHEMA",
+                "Unexpected server handshake order.")
+        if (
+            "match_id" in payload
+            and payload["match_id"] != self.credentials["match_id"]
+        ):
+            raise ProtocolError(
+                "INVALID_SCHEMA",
+                "The server sent a message for a different match.")
         if kind == "PING" and not (self.quitting or self.terminal):
             self.peer.queue(message("PONG", probe_id=payload["probe_id"]))
         elif kind == "PONG":
             self.peer.pong(payload["probe_id"])
         elif kind == "GAME_START":
-            print(f"Match started. {payload['first_player_id']} goes first.", flush=True)
+            starter = payload["first_player_id"]
+            print(f"Match started. {starter} goes first.", flush=True)
         elif kind == "STATE_UPDATE":
             self.apply_snapshot(payload)
         elif kind == "GAME_OVER":
-            if not self.terminal or self.snapshot["state_revision"] != payload["state_revision"]:
-                raise ProtocolError("INVALID_SCHEMA", "The result arrived without its terminal state.")
+            if (
+                not self.terminal
+                or self.snapshot["state_revision"] != payload["state_revision"]
+            ):
+                raise ProtocolError(
+                    "INVALID_SCHEMA",
+                    "The result arrived without its terminal state.")
             if self.result is None:
                 self.peer.complete_probe()
                 self.peer.stop_heartbeats()
@@ -381,9 +487,13 @@ class Client:
                 if payload["winner_id"] is None:
                     self.show_panel("Result", "Match ended without a winner.")
                 else:
-                    outcome = "You win" if payload["winner_id"] == self.credentials["player_id"] else "You lose"
-                    self.show_panel("Result", f"{outcome}. {payload['winner_id']} wins by "
-                                    f"{RESULT_TEXT[payload['reason']]}.")
+                    winner = payload["winner_id"]
+                    reason = RESULT_TEXT[payload["reason"]]
+                    won = winner == self.credentials["player_id"]
+                    outcome = "You win" if won else "You lose"
+                    self.show_panel(
+                        "Result", f"{outcome}. {winner} wins by {reason}."
+                    )
         elif kind == "DISCONNECT":
             self.draining = True
             self.peer.begin_close(time.monotonic())
@@ -394,12 +504,19 @@ class Client:
         peer = self.peer
         if peer is None:
             return
-        if any(deadline is not None and now >= deadline for deadline in (
-            peer.close_deadline, peer.output_deadline(), peer.probe_deadline(), self.sync_deadline,
-        )):
+        if peer.output_overloaded:
+            self.disconnected("The connection sent too many requests.")
+            return
+        deadlines = (
+            peer.close_deadline, peer.output_deadline(),
+            peer.probe_deadline(), self.sync_deadline,
+        )
+        if any(value is not None and now >= value for value in deadlines):
             self.disconnected("The connection timed out.")
             return
-        revision = -1 if self.snapshot is None else self.snapshot["state_revision"]
+        revision = (
+            -1 if self.snapshot is None else self.snapshot["state_revision"]
+        )
         peer.tick(now, revision)
         try:
             peer.shutdown_writes()
@@ -432,7 +549,8 @@ class Client:
                     return
                 self.handle(frame)
             except ProtocolError:
-                self.disconnected("The server sent an invalid protocol message.")
+                self.disconnected(
+                    "The server sent an invalid protocol message.")
                 return
 
     def step(self):
@@ -452,10 +570,11 @@ class Client:
             else:
                 self.selector.modify(peer.sock, interest)
             self.registered = interest
-        # A short maximum wait lets the network loop handle console input without blocking on it.
+        # Poll for console input between socket events.
         now = time.monotonic()
         deadlines = (self.sync_deadline, *peer.deadlines())
-        wait = min((max(0, value - now) for value in deadlines if value is not None), default=0.05)
+        wait = min((max(0, value - now)
+                   for value in deadlines if value is not None), default=0.05)
         for _, events in self.selector.select(min(wait, 0.05)):
             self.maintain(time.monotonic())
             if self.peer is peer and events & selectors.EVENT_READ:
