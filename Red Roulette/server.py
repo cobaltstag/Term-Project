@@ -10,7 +10,7 @@ import sys
 import time
 
 from protocol import (
-    CLIENT_TYPES, DEFAULT_PORT, GRACE_SECONDS, IO_BUDGET, PHASE_ACTIONS,
+    CLIENT_TYPES, GRACE_SECONDS, IO_BUDGET, PHASE_ACTIONS,
     PLAYER_IDS, PLAYING, Peer, ProtocolError, allowed_actions, error_message,
     message, validate,)
 
@@ -524,20 +524,20 @@ class Server:
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "-p", "--port", type=int, default=DEFAULT_PORT,
-        help="TCP listening port (default: %(default)s)",
+        "-p", "--port", required=True, type=int, metavar="PORT",
+        help="TCP listening port (1024-65535)",
     )
     parser.add_argument(
         "--bind", default="0.0.0.0",
         help="IPv4 listening address (default: %(default)s)",
     )
     args = parser.parse_args()
-    if not 1 <= args.port <= 65535:
-        parser.error("port must be between 1 and 65535")
+    if not 1024 <= args.port <= 65535:
+        parser.error("port must be between 1024 and 65535")
 
     address = (args.bind, args.port)
     try:
-        with socket.create_server(address) as listener:
+        with socket.create_server(address, family=socket.AF_INET) as listener:
             with selectors.DefaultSelector() as selector:
                 listener.setblocking(False)
                 print(f"Listening on {address[0]}:{address[1]}.", flush=True)

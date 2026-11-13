@@ -13,6 +13,8 @@ import time
 import unittest
 from unittest.mock import Mock, patch
 
+import client
+import server
 from client import Client
 from protocol import (
     OUTPUT_FRAME_LIMIT,
@@ -212,6 +214,58 @@ class WireTests(unittest.TestCase):
                 "RECONNECT"), move("PASS", 1, 3, count=2)):
             with self.assertRaises(ProtocolError):
                 validate(frame, "client")
+
+
+class CliTests(unittest.TestCase):
+    def test_rejects_missing_arguments_and_invalid_ports(self):
+        cases = [
+            (client, [], "required"),
+            (client, ["-p", "45700"], "-i"),
+            (client, ["-i", "localhost"], "-p"),
+            (client, ["-i", " ", "-p", "45700"], "must not be empty"),
+            (server, [], "-p"),
+        ]
+        for app, options in ((client, ["-i", "localhost"]), (server, [])):
+            for port, error in (
+                ("nope", "invalid int value"),
+                ("1023", "1024 and 65535"),
+                ("65536", "1024 and 65535"),
+            ):
+                cases.append((app, [*options, "-p", port], error))
+
+        for app, options, error in cases:
+            with self.subTest(app=app.__name__, options=options):
+                argv = [f"{app.__name__}.py", *options]
+                stderr = io.StringIO()
+                with patch.object(sys, "argv", argv):
+                    with patch.object(sys, "stderr", stderr):
+                        with self.assertRaises(SystemExit) as exit_status:
+                            app.main()
+                self.assertEqual(exit_status.exception.code, 2)
+                self.assertIn("usage:", stderr.getvalue())
+                self.assertIn(error, stderr.getvalue())
+
+    def test_accepts_port_boundaries_and_default_ipv4_bind(self):
+        for port in (1024, 65535):
+            with self.subTest(port=port):
+                self.check_port(port)
+
+    def check_port(self, port):
+        argv = ["client.py", "-i", "localhost", "-p", str(port)]
+        with patch.object(sys, "argv", argv), patch("client.Client") as app:
+            client.main()
+            self.assertEqual(app.call_args.args[1:3], ("localhost", port))
+            app.return_value.run.assert_called_once()
+
+        argv = ["server.py", "-p", str(port)]
+        with patch.object(sys, "argv", argv), patch("server.Server") as app:
+            with patch("server.socket.create_server") as create_server:
+                with patch.object(sys, "stdout", new=io.StringIO()):
+                    server.main()
+                create_server.assert_called_once_with(
+                    ("0.0.0.0", port), family=socket.AF_INET,
+                )
+                app.return_value.run.assert_called_once()
 
 
 class FakeTransport:

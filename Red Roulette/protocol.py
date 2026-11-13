@@ -10,8 +10,6 @@ import sys
 import time
 
 
-DEFAULT_HOST = "server.barton.edu"
-DEFAULT_PORT = 45700
 FRAME_LIMIT = 4096
 IO_BUDGET = 5
 GRACE_SECONDS = 30

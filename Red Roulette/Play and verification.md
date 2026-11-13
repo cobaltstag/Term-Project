@@ -7,13 +7,13 @@ Keep `server.py`, `client.py`, and `protocol.py` in the same folder. The program
 From the program folder, run the server in one terminal and the client in two other terminals.
 
 ```text
-python server.py
-python client.py -i localhost
+python server.py -p 45700
+python client.py -i localhost -p 45700
 ```
 
-Use the full path to the bundled Python executable in PowerShell if `python` is unavailable as a command. Both programs support `-h`. The server binds to `0.0.0.0` and listens on TCP port `45700` by default. Use `-p` on both sides to select a different port. The client defaults to `server.barton.edu` for CML.
+Use the full path to the bundled Python executable in PowerShell if `python` is unavailable as a command. Both programs support `-h` and require the same TCP port from 1024 through 65535. The server listens on `0.0.0.0` by default. The client requires a DNS hostname or IPv4 address. In CML, use `server.barton.edu`.
 
-For play on one computer, start the server with `python server.py --bind 127.0.0.1`. In CML, `--bind` can select the server node's IPv4 address. The lab protocol sends game messages and reconnect credentials over plain TCP. Keep the listener on a trusted network and redact reconnect tokens in shared captures.
+For play on one computer, start the server with `python server.py -p 45700 --bind 127.0.0.1`. In CML, `--bind` can select the server node's IPv4 address. The lab protocol sends game messages and reconnect credentials over plain TCP. Keep the listener on a trusted network and redact reconnect tokens in shared captures.
 
 The server randomly chooses who goes first once both players have joined. On a normal turn, `trigger` fires and `pass` dares the other player to shoot. If they survive and finish their loading decision, you must shoot in return. After surviving a shot, enter `load NUMBER` to spend banked bullets or `end` to hand over the turn. Use `quit` at a prompt or Ctrl+C to leave. After a connection interruption, follow the prompt to `reconnect` while the original process retains the session and the server's grace window is still open. If a prompt is obsolete, press Enter to refresh it.
 
@@ -22,8 +22,8 @@ The server randomly chooses who goes first once both players have joined. On a n
 Choose a style when you start each client. The table is the default on this branch. The log keeps more of the match visible in a short terminal window.
 
 ```text
-python client.py -i localhost --style table
-python client.py -i localhost --style log
+python client.py -i localhost -p 45700 --style table
+python client.py -i localhost -p 45700 --style log
 ```
 
 The table gives the current phase and inventory their own rows.

@@ -12,7 +12,7 @@ from threading import Thread
 import time
 
 from protocol import (
-    DEFAULT_HOST, DEFAULT_PORT, GAMEPLAY_EVENTS, IO_BUDGET, SERVER_TYPES,
+    GAMEPLAY_EVENTS, IO_BUDGET, SERVER_TYPES,
     Peer, ProtocolError, message, move, validate,
 )
 
@@ -75,7 +75,8 @@ def dial(hostname, port):
     def resolve():
         try:
             addresses = socket.getaddrinfo(
-                hostname, port, type=socket.SOCK_STREAM)
+                hostname, port, family=socket.AF_INET, type=socket.SOCK_STREAM
+            )
         except (OSError, UnicodeError) as error:
             lookup.put(error)
         else:
@@ -603,15 +604,21 @@ class Client:
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("-i", "--hostname", default=DEFAULT_HOST,
-                        help="server DNS hostname (default: %(default)s)")
-    parser.add_argument("-p", "--port", type=int, default=DEFAULT_PORT,
-                        help="server TCP port (default: %(default)s)")
+    parser.add_argument(
+        "-i", "--hostname", required=True, metavar="SERVER",
+        help="server DNS hostname or IPv4 address",
+    )
+    parser.add_argument(
+        "-p", "--port", required=True, type=int, metavar="PORT",
+        help="server TCP port (1024-65535)",
+    )
     parser.add_argument("--style", choices=("table", "log"), default="table",
                         help="terminal layout (default: %(default)s)")
     args = parser.parse_args()
-    if not 1 <= args.port <= 65535:
-        parser.error("port must be between 1 and 65535")
+    if not args.hostname.strip():
+        parser.error("server hostname or IPv4 address must not be empty")
+    if not 1024 <= args.port <= 65535:
+        parser.error("port must be between 1024 and 65535")
     try:
         with selectors.DefaultSelector() as selector:
             return Client(selector, args.hostname, args.port, args.style).run()
