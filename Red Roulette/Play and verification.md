@@ -7,11 +7,13 @@ Keep `server.py`, `client.py`, and `protocol.py` in the same folder. The program
 From the program folder, run the server in one terminal and the client in two other terminals.
 
 ```text
-python server.py
-python client.py -i localhost
+python server.py -p 45700
+python client.py -i localhost -p 45700
 ```
 
-Use the full path to the bundled Python executable in PowerShell if `python` is unavailable as a command. Both programs support `-h`. The server binds to `0.0.0.0` and listens on TCP port `45700` by default. Use `-p` on both sides to select a different port. The client defaults to `server.barton.edu` for CML.
+Use the full path to the bundled Python executable in PowerShell if `python` is unavailable as a command. Both programs support `-h` and require the same TCP port from 1024 through 65535. The server listens on `0.0.0.0` by default. The client requires a DNS hostname or IPv4 address. In CML, use `server.barton.edu`.
+
+For play on one computer, start the server with `python server.py -p 45700 --bind 127.0.0.1`. In CML, `--bind` can select the server node's IPv4 address. The lab protocol sends game messages and reconnect credentials over plain TCP. Keep the listener on a trusted network and redact reconnect tokens in shared captures.
 
 The server randomly chooses who goes first once both players have joined. On a normal turn, `trigger` fires and `pass` dares the other player to shoot. If they survive and finish their loading decision, you must shoot in return. After surviving a shot, enter `load NUMBER` to spend banked bullets or `end` to hand over the turn. Use `quit` at a prompt or Ctrl+C to leave. After a connection interruption, follow the prompt to `reconnect` while the original process retains the session and the server's grace window is still open. If a prompt is obsolete, press Enter to refresh it.
 
@@ -20,8 +22,8 @@ The server randomly chooses who goes first once both players have joined. On a n
 Choose a style when you start each client. The table is the default on this branch. The log keeps more of the match visible in a short terminal window.
 
 ```text
-python client.py -i localhost --style table
-python client.py -i localhost --style log
+python client.py -i localhost -p 45700 --style table
+python client.py -i localhost -p 45700 --style log
 ```
 
 The table gives the current phase and inventory their own rows.
@@ -50,6 +52,8 @@ Both styles draw with ASCII characters and append updates to the terminal's scro
 The [GitHub design commit](https://github.com/cobaltstag/Term-Project/commit/55ce92953f1826247694bfee50b1db5e95591adf) specifies the wire protocol and state machine. Two decisions from the implementation discussion govern the code. The starter is random after both seats are online. Due write and heartbeat failures are both processed before the server awards a reconnect-timeout win.
 
 ## Verification
+
+The security review added five regression tests for connection limits, reply floods, reconnect grace under overload, and terminal escape sequences. All 27 tests passed on Windows with Python 3.12, including real loopback TCP games. The four Python files passed pycodestyle with 79-character code lines and 72-character comments and docstrings.
 
 Run `python -B -m unittest -v test_game` with `test_game.py` in the program folder. The initial implementation passed all 22 tests with `python -B -W error::ResourceWarning -m unittest -v test_game`. The suite uses a scripted starter and chamber sequence for repeatable outcomes, a controlled clock for deadline boundaries, and real loopback TCP with separate console processes. Tests also check the help screens, hostname resolution failure, and connection refusal. For the console wording update, ten tests that need no network passed and an in-memory replay verified the reported moves. The environment blocked the loopback rerun.
 
